@@ -25,7 +25,7 @@ emcc web_client/client_main.cpp src/miniaudio_impl.cpp \
     -O3 \
     -s WASM=1 \
     -lwebsocket \
-    -s EXPORTED_FUNCTIONS='["_start_web_audio", "_stop_web_audio"]' \
+    -s EXPORTED_FUNCTIONS='["_start_web_audio", "_set_web_audio_identity", "_stop_web_audio"]' \
     -s EXPORTED_RUNTIME_METHODS='["ccall", "cwrap", "allocateUTF8"]' \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s NO_EXIT_RUNTIME=1

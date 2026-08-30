@@ -63,6 +63,7 @@ button:disabled { opacity: .45; cursor: wait; }
 <div class="toolbar">
     <button class="primary" onclick="refreshAll()">REFRESH</button>
     <button onclick="resetAll()">RESET CLIPS</button>
+    <button id="save-settings" onclick="saveSettings()">SAVE SETTINGS</button>
     <span id="status">Loading graph...</span>
 </div>
 
@@ -90,7 +91,7 @@ button:disabled { opacity: .45; cursor: wait; }
         <label>Gain<input id="route-gain" type="number" min="0" max="8" step="0.01" value="1"></label>
         <button id="connect" onclick="addRoute()">CONNECT</button>
     </div>
-    <small class="hint">Each connection is one source channel to one destination channel. Multiple connections may feed one channel; one source may feed many destinations. Selections are preserved during automatic refreshes.</small>
+    <small class="hint">Each connection is one source channel to one destination channel. Multiple connections may feed one channel; one source may feed many destinations. Changes apply live; SAVE SETTINGS persists all routes and settings for restart/reconnection.</small>
 </section>
 
 <section class="panel">
@@ -137,7 +138,7 @@ const clientHistory = new Map();
 function esc(value) {
     return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
 }
-function endpointLabel(endpoint, channel) { return `${endpoint.id} / CH${channel + 1}`; }
+function endpointLabel(endpoint, channel) { return `${endpoint.name || endpoint.id} / CH${channel + 1}`; }
 function endpointMap() { return Object.fromEntries(graph.endpoints.map(endpoint => [endpoint.id, endpoint])); }
 function selectedValue(id) { return $(id).value; }
 function setOptions(id, items, oldValue) {
@@ -165,7 +166,7 @@ function setRawVisibility(visible) {
 function renderClients(data) {
     $('clients').innerHTML = data.clients.length ? data.clients.map(client => `
         <div class="client connected">
-            <h3>Client #${client.id}</h3>
+            <h3>${esc(client.name || client.client_id || ('Client #' + client.id))}</h3>
             <small>${esc(client.ip || 'unknown')}</small>
             <div class="endpoint">INPUT: ${client.input_channels} ch</div>
             <div class="endpoint">OUTPUT: ${client.output_channels} ch</div>
@@ -176,7 +177,7 @@ function renderClients(data) {
 function renderClientMeters(data) {
     $('client-meters').innerHTML = data.clients.length ? data.clients.map(client => `
         <div class="client">
-            <h3>Client #${client.id}</h3>
+            <h3>${esc(client.name || client.client_id || ('Client #' + client.id))}</h3>
             <div class="client-meter-groups">
                 <div class="client-meter-group">
                     <h4>CLIENT INPUT → SERVER</h4>
@@ -234,7 +235,7 @@ function renderRoutes() {
             <span class="edge ${route.enabled ? '' : 'muted'}">#${route.id}: ${esc(sourceLabel)} → ${esc(destinationLabel)}</span>
             <label>Gain <input id="gain-${route.id}" data-route-gain="${route.id}" type="number" min="0" max="8" step="0.01" value="${gain}"></label>
             <button data-action="toggle" data-id="${route.id}" data-enabled="${!route.enabled}">${route.enabled ? 'MUTE' : 'ENABLE'}</button>
-            <button data-action="save" data-id="${route.id}" data-enabled="${route.enabled}">SAVE GAIN</button>
+            <button data-action="save" data-id="${route.id}" data-enabled="${route.enabled}">APPLY GAIN</button>
             <button data-action="delete" data-id="${route.id}">UNROUTE</button>
         </div>`;
     }).join('') : '<span>None</span>';
@@ -310,6 +311,19 @@ async function loadTone() {
         $('tone-frequency').value = tone.frequency_hz;
         $('tone-amplitude').value = tone.amplitude;
     } catch (error) {}
+}
+async function saveSettings() {
+    const button = $('save-settings');
+    button.disabled = true;
+    try {
+        const response = await fetch('/api/settings/save', { method: 'POST' });
+        if (!response.ok) throw Error(await response.text());
+        const old = button.textContent;
+        button.textContent = 'SAVED';
+        setTimeout(() => { button.textContent = old; }, 1200);
+    } catch (error) {
+        alert('Settings could not be saved.');
+    } finally { button.disabled = false; }
 }
 async function resetAll() { await fetch('/api/reset_clips?all=1', { method: 'POST' }); }
 function dbPercent(db) { return Math.max(0, Math.min(100, (Number(db) + 60) * 100 / 60)); }

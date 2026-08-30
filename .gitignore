@@ -3,3 +3,4 @@ build/
 *.o
 web_client/dist/
 certs/
+cm5audio_settings.json

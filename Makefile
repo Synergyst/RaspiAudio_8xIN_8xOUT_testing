@@ -1,5 +1,6 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -Wall -pthread
+NLOHMANN_JSON_INCLUDE ?= ../json/include
+CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -I$(NLOHMANN_JSON_INCLUDE) -Wall -pthread
 LDFLAGS = -L/usr/local/lib -lixwebsocket -lssl -lcrypto -lz -lpthread
 
 SRCS = src/main.cpp src/miniaudio_impl.cpp src/web_server.cpp

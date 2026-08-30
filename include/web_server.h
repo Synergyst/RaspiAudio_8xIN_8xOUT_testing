@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include "miniaudio.h"
 
@@ -92,6 +93,8 @@ struct PcmRingBuffer {
 struct WebClientSession {
     uint32_t id = 0;
     std::string remote_ip;
+    std::shared_ptr<const std::string> client_key;
+    std::shared_ptr<const std::string> client_name;
     std::atomic<unsigned> input_channels{1};   // client -> server
     std::atomic<unsigned> output_channels{2};  // server -> client
     PcmRingBuffer incoming_rb;
@@ -104,6 +107,9 @@ struct WebClientSession {
     std::atomic<bool> active{true};
     std::thread sender_thread;
 
+    std::string get_client_key() const;
+    std::string get_client_name() const;
+    void set_identity(const std::string& key, const std::string& name);
     void start_sender(const std::shared_ptr<ix::WebSocket>& socket);
     void stop_sender();
     ~WebClientSession();
@@ -125,6 +131,11 @@ public:
     std::shared_ptr<WebClientSession> create_session(uint32_t id, const std::string& remoteIp = "");
     void remove_session(uint32_t id);
     std::vector<std::shared_ptr<WebClientSession>> get_active_sessions();
+    bool claim_identity(const std::shared_ptr<WebClientSession>& session,
+                       const std::string& key, const std::string& name);
+    bool load_settings(AudioControls& controls, ToneControls& tone);
+    bool save_settings(const AudioControls& controls, const ToneControls& tone) const;
+    std::unordered_map<std::string, std::string> known_client_names() const;
 
     std::shared_ptr<const std::vector<AudioRoute>> route_snapshot() const;
     std::vector<AudioRoute> get_routes() const;
@@ -134,10 +145,11 @@ public:
 
 private:
     bool endpoint_exists(const std::string& endpoint, bool source) const;
-    std::mutex m_lock;
+    mutable std::mutex m_lock;
     std::vector<std::shared_ptr<WebClientSession>> m_sessions;
     mutable std::mutex m_route_lock;
     std::shared_ptr<const std::vector<AudioRoute>> m_routes;
+    std::unordered_map<std::string, std::string> m_known_client_names;
     std::atomic<uint32_t> m_next_route_id{1};
 };
 

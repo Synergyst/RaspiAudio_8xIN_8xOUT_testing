@@ -26,8 +26,9 @@ static float lin_to_db(float lin) {
 }
 
 static std::shared_ptr<WebClientSession> find_client(
-    const std::vector<std::shared_ptr<WebClientSession>>& sessions, uint32_t id) {
-    for (const auto& session : sessions) if (session->id == id) return session;
+    const std::vector<std::shared_ptr<WebClientSession>>& sessions, const std::string& key) {
+    for (const auto& session : sessions)
+        if (session->get_client_key() == key) return session;
     return {};
 }
 
@@ -52,15 +53,13 @@ static void update_endpoint_metrics(std::array<ChannelMeter, CM5_MAX_CHANNELS>& 
     }
 }
 
-static bool parse_client_endpoint(const std::string& endpoint, bool source, uint32_t& id) {
+static bool parse_client_endpoint(const std::string& endpoint, bool source, std::string& key) {
     const std::string prefix = "client/";
     const std::string suffix = source ? "/capture" : "/playback";
     if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 ||
         endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
-    try {
-        id = static_cast<uint32_t>(std::stoul(endpoint.substr(prefix.size(), endpoint.size() - prefix.size() - suffix.size())));
-        return id != 0;
-    } catch (...) { return false; }
+    key = endpoint.substr(prefix.size(), endpoint.size() - prefix.size() - suffix.size());
+    return !key.empty();
 }
 
 void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 frameCount) {
@@ -140,14 +139,14 @@ void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 fram
     const auto routes = g_clientMgr.route_snapshot();
     for (const auto& route : *routes) {
         if (!route.enabled || route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS) continue;
-        uint32_t source_id = 0, destination_id = 0;
+        std::string source_key, destination_key;
         const bool source_hw = route.source_endpoint == "hardware/capture";
         const bool source_tone = route.source_endpoint == "tone/generator";
         const bool destination_hw = route.destination_endpoint == "hardware/playback";
-        if (!source_hw && !source_tone && !parse_client_endpoint(route.source_endpoint, true, source_id)) continue;
-        if (!destination_hw && !parse_client_endpoint(route.destination_endpoint, false, destination_id)) continue;
-        auto source_session = source_hw || source_tone ? std::shared_ptr<WebClientSession>() : find_client(sessions, source_id);
-        auto destination_session = destination_hw ? std::shared_ptr<WebClientSession>() : find_client(sessions, destination_id);
+        if (!source_hw && !source_tone && !parse_client_endpoint(route.source_endpoint, true, source_key)) continue;
+        if (!destination_hw && !parse_client_endpoint(route.destination_endpoint, false, destination_key)) continue;
+        auto source_session = source_hw || source_tone ? std::shared_ptr<WebClientSession>() : find_client(sessions, source_key);
+        auto destination_session = destination_hw ? std::shared_ptr<WebClientSession>() : find_client(sessions, destination_key);
         if ((!source_hw && !source_tone && !source_session) || (!destination_hw && !destination_session)) continue;
         const unsigned source_channels = source_hw || source_tone ? CM5_MAX_CHANNELS :
             std::clamp(source_session->input_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
@@ -208,6 +207,7 @@ int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     std::cout << "Starting CM5 Audio Network Patchbay..." << std::endl;
+    g_clientMgr.load_settings(g_controls, g_tone);
 
     WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, 8182);
     if (!webServer.start()) return -1;
