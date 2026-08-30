@@ -159,8 +159,8 @@ int main() {
     }
 
     std::cout << "Operational." << std::endl;
-    std::cout << " - Dashboard:   http://192.168.168.172:8182/" << std::endl;
-    std::cout << " - WASM Client:  http://192.168.168.172:8182/client/index.html" << std::endl;
+    std::cout << " - Dashboard:   https://192.168.168.172:8182/" << std::endl;
+    std::cout << " - WASM Client:  https://192.168.168.172:8182/client/index.html" << std::endl;
 
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

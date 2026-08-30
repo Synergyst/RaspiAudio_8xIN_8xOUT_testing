@@ -103,9 +103,11 @@
 </div>
 
 <script>
-    // Automatically set default WebSocket URL based on host
+    // The browser only exposes getUserMedia from a secure context. Use WSS
+    // automatically when this page is served over HTTPS.
     const defaultWsHost = location.hostname ? location.hostname : '192.168.168.172';
-    document.getElementById('ws-url').value = `ws://${defaultWsHost}:8183/ws/audio`;
+    const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    document.getElementById('ws-url').value = `${wsScheme}://${defaultWsHost}:8183/ws/audio`;
 
     let start_web_audio = null;
     let stop_web_audio = null;
@@ -131,6 +133,11 @@
         const url = document.getElementById('ws-url').value.trim();
         if (!url) {
             updateStatus('Please enter a valid WebSocket URL.', false, true);
+            return;
+        }
+
+        if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            updateStatus('Microphone access requires HTTPS (or localhost). Open the HTTPS client URL.', false, true);
             return;
         }
 

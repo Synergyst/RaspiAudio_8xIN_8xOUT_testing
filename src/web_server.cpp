@@ -1,9 +1,11 @@
 #include "web_server.h"
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 #include <ixwebsocket/IXWebSocketServer.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -62,9 +64,31 @@ static std::string read_dashboard() {
 bool WebServer::start() {
     if (m_running.exchange(true)) return true;
 
-    m_httpThread = std::thread([this]() {
-        httplib::Server server;
-        server.set_mount_point("/client", "./web_client");
+    const std::string certPath = [] {
+        const char* value = std::getenv("CM5AUDIO_TLS_CERT");
+        return value && *value ? std::string(value) : "./certs/server.crt";
+    }();
+    const std::string keyPath = [] {
+        const char* value = std::getenv("CM5AUDIO_TLS_KEY");
+        return value && *value ? std::string(value) : "./certs/server.key";
+    }();
+    const bool tlsEnabled = std::ifstream(certPath).good() && std::ifstream(keyPath).good();
+
+    m_httpThread = std::thread([this, certPath, keyPath, tlsEnabled]() {
+        std::unique_ptr<httplib::Server> server;
+        if (tlsEnabled) {
+            auto sslServer = std::make_unique<httplib::SSLServer>(certPath.c_str(), keyPath.c_str());
+            if (!sslServer->is_valid()) {
+                std::cerr << "[HTTP] TLS certificate/key could not be loaded" << std::endl;
+                m_running = false;
+                return;
+            }
+            server = std::move(sslServer);
+        } else {
+            std::cerr << "[HTTP] TLS certificate/key not found; serving plain HTTP" << std::endl;
+            server = std::make_unique<httplib::Server>();
+        }
+        server->set_mount_point("/client", "./web_client");
 
         auto meters = [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;
@@ -91,10 +115,10 @@ bool WebServer::start() {
             json << "]}";
             response.set_content(json.str(), "application/json");
         };
-        server.Get("/api/meters", meters);
-        server.Get("/api/metrics", meters);
+        server->Get("/api/meters", meters);
+        server->Get("/api/metrics", meters);
 
-        server.Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
+        server->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
                 const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
@@ -113,7 +137,7 @@ bool WebServer::start() {
             }
         });
 
-        server.Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
+        server->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 if (request.has_param("all")) {
                     for (int i = 0; i < 8; ++i) {
@@ -141,16 +165,25 @@ bool WebServer::start() {
             }
         });
 
-        server.Get("/", [](const httplib::Request&, httplib::Response& response) {
+        server->Get("/", [](const httplib::Request&, httplib::Response& response) {
             response.set_content(read_dashboard(), "text/html; charset=UTF-8");
         });
 
-        std::cout << "[HTTP] Dashboard listening on http://0.0.0.0:" << m_httpPort << std::endl;
-        server.listen("0.0.0.0", m_httpPort);
+        std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http")
+                  << "://0.0.0.0:" << m_httpPort << std::endl;
+        server->listen("0.0.0.0", m_httpPort);
     });
 
-    m_wsThread = std::thread([this]() {
+    m_wsThread = std::thread([this, certPath, keyPath, tlsEnabled]() {
         ix::WebSocketServer server(m_wsPort, "0.0.0.0");
+        if (tlsEnabled) {
+            ix::SocketTLSOptions tls;
+            tls.certFile = certPath;
+            tls.keyFile = keyPath;
+            tls.caFile = "NONE";
+            tls.tls = true;
+            server.setTLSOptions(tls);
+        }
         static std::atomic<uint32_t> next_id{1};
         server.setOnConnectionCallback([this](std::weak_ptr<ix::WebSocket> weakSocket,
                                                std::shared_ptr<ix::ConnectionState>) {

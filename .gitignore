@@ -1,3 +1,5 @@
 cm5audio
+build/
 *.o
 web_client/dist/
+certs/

@@ -1,14 +1,15 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Ensure output directory exists
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+# Ensure output directory exists.
 mkdir -p web_client/dist
 
-# Verify emcc availability
-if ! command -v emcc &> /dev/null; then
-    echo "[ERROR] Emscripten compiler (emcc) not found in PATH."
-    echo "Please activate your Emscripten SDK environment first:"
-    echo "  source /path/to/emsdk/emsdk_env.sh"
+if ! command -v emcc >/dev/null 2>&1; then
+    echo "[ERROR] Emscripten compiler (emcc) not found in PATH." >&2
+    echo "Please install/activate the Emscripten SDK first." >&2
     exit 1
 fi
 
@@ -16,12 +17,15 @@ echo "=================================================="
 echo "Compiling Miniaudio WASM Client with Emscripten..."
 echo "=================================================="
 
-emcc web_client/client_main.cpp -o web_client/dist/client_audio.js \
+# client_main.cpp contains the browser bridge; miniaudio_impl.cpp supplies the
+# miniaudio implementation. Both are required at link time.
+emcc web_client/client_main.cpp src/miniaudio_impl.cpp \
+    -o web_client/dist/client_audio.js \
     -Iinclude \
     -O3 \
     -s WASM=1 \
     -lwebsocket \
-    -s EXPORTED_FUNCTIONS='["_start_web_audio", "_stop_web_audio", "_main"]' \
+    -s EXPORTED_FUNCTIONS='["_start_web_audio", "_stop_web_audio"]' \
     -s EXPORTED_RUNTIME_METHODS='["ccall", "cwrap", "allocateUTF8"]' \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s NO_EXIT_RUNTIME=1
