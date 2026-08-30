@@ -10,6 +10,9 @@ A Raspberry Pi CM5 audio engine for 8-channel duplex capture/playback with a bro
 - HTTP(S) dashboard and static web client
 - WebSocket (WS/WSS) PCM bridge for browser clients
 - Emscripten/WASM browser client
+- Persistent server settings and route restoration
+- Stable browser client identities with human-readable names
+- Single **SAVE SETTINGS** workflow for all settings and routes
 
 ## Runtime endpoints
 
@@ -23,6 +26,9 @@ When started from the repository root with the supplied TLS certificate:
 - Tone API: `GET /api/tone` and `POST /api/tone?enabled=0|1&frequency=440&amplitude=0.2`
 - Control API: `POST /api/control?type=capture|playback&ch=0..7&gain=1.0&mute=0|1`
 - Clip reset API: `POST /api/reset_clips?type=capture|playback&ch=0..7` or `POST /api/reset_clips?all=1`
+- Settings save API: `POST /api/settings/save`
+
+Settings are stored in `./cm5audio_settings.json` by default. Override the path with `CM5AUDIO_SETTINGS`. The file stores hardware controls, tone settings, client names/identities, and the complete route list. The server loads it at startup and keeps saved client routes available for reconnection. The dashboard uses one **SAVE SETTINGS** button; settings and routes otherwise apply live in memory.
 
 The server uses `CM5AUDIO_TLS_CERT` and `CM5AUDIO_TLS_KEY` when set. Otherwise it looks for `./certs/server.crt` and `./certs/server.key`. If neither file is available, it falls back to plain HTTP/WS; microphone access from a LAN IP will then be blocked by Chromium's secure-context policy.
 
@@ -186,6 +192,7 @@ Build outputs, WASM distribution files, native private keys, and generated certi
 - The dashboard displays hardware meters first and per-client channel meters below them, including per-channel history graphs.
 - The raw-value checkbox explicitly shows `OFF — HIDDEN` or `ON — VISIBLE`; when enabled, hardware and client cards show current raw sample and block peak values.
 - The MVP is intended for a trusted LAN with zero application authentication and zero manual enrollment; clients connect and appear automatically.
+- Browser client IDs and names are stored in browser `localStorage`. Reconnecting reuses the saved identity; a simultaneous reuse receives an identity-conflict prompt before a new ID is created.
 
 ## Planning and status tracking
 
