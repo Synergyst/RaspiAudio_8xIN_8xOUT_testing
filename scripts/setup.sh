@@ -116,19 +116,34 @@ keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 EOF
 
+CERT_NEEDS_GENERATION=0
 if [[ ! -s certs/server.crt || ! -s certs/server.key ]]; then
+    CERT_NEEDS_GENERATION=1
+elif ! openssl x509 -in certs/server.crt -noout >/dev/null 2>&1 || \
+     ! openssl pkey -in certs/server.key -noout >/dev/null 2>&1 || \
+     [[ "$(openssl x509 -in certs/server.crt -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)" != \
+        "$(openssl pkey -in certs/server.key -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)" ]]; then
+    echo "Existing TLS certificate or key is invalid or mismatched; regenerating."
+    CERT_NEEDS_GENERATION=1
+elif [[ "$HOST_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    openssl verify -CAfile certs/server.crt -verify_ip "$HOST_IP" certs/server.crt >/dev/null 2>&1 || CERT_NEEDS_GENERATION=1
+else
+    openssl verify -CAfile certs/server.crt -verify_hostname "$HOST_IP" certs/server.crt >/dev/null 2>&1 || CERT_NEEDS_GENERATION=1
+fi
+
+if [[ "$CERT_NEEDS_GENERATION" -eq 1 ]]; then
     echo "Generating development TLS certificate for $HOST_IP"
     openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
         -keyout certs/server.key \
         -out certs/server.crt \
         -config "$CERT_CONFIG" \
         >/dev/null 2>&1
-    chmod 600 certs/server.key
-    chmod 644 certs/server.crt
 else
     echo "Using existing certs/server.crt and certs/server.key"
 fi
 
+chmod 600 certs/server.key
+chmod 644 certs/server.crt
 openssl x509 -in certs/server.crt -noout -subject -ext subjectAltName
 
 if [[ "$BUILD" -eq 1 ]]; then
@@ -141,3 +156,5 @@ if [[ "$BUILD_WASM" -eq 1 ]]; then
 fi
 
 echo "Setup complete. Start the engine with: ./cm5audio"
+echo "For each Ubuntu Brave/Chromium client, copy certs/server.crt and scripts/trust_server_cert.sh, then run as the browser user:"
+echo "  ./scripts/trust_server_cert.sh /path/to/server.crt"

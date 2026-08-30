@@ -57,7 +57,7 @@ The helper also creates a self-signed certificate with an IP subject-alt-name fo
 CM5AUDIO_HOST=192.168.168.172 ./scripts/setup.sh
 ```
 
-Generated private keys, certificates, and certificate configuration files are ignored by Git.
+The certificate and private key are generated locally and are ignored by Git. `setup.sh` validates an existing certificate's host name/IP SAN and regenerates it if `CM5AUDIO_HOST` changes. The certificate must be trusted separately on each browser client; installing it on the CM5 alone is not enough.
 
 ## Build
 
@@ -97,6 +97,8 @@ CM5AUDIO_TLS_KEY=/absolute/path/server.key \
 ./cm5audio
 ```
 
+The process must be started from the repository root unless the web assets and default certificate paths are changed. Only one instance should use ports `8182` and `8183`; check existing instances with `ss -ltnp | grep -E ':8182|:8183'`.
+
 The native process requires an available 8-channel, 48 kHz duplex audio device. On a headless CM5, verify the selected ALSA device and channel capabilities if initialization fails.
 
 ## Browser microphone access
@@ -107,16 +109,50 @@ The native process requires an available 8-channel, 48 kHz duplex audio device. 
 https://192.168.168.172:8182/client/index.html
 ```
 
-Because the setup helper creates a self-signed certificate, Chromium will initially show a certificate warning. For a development-only LAN setup:
+Because the setup helper creates a self-signed certificate, each browser client must trust the exact certificate. The simplest Ubuntu procedure is:
 
-1. Open the HTTPS URL.
-2. Choose **Advanced**, then **Proceed to 192.168.168.172 (unsafe)**.
-3. In the address-bar site settings, set **Microphone** to **Allow**.
-4. Reload the page and confirm the WebSocket field is:
+1. Copy the certificate from the CM5 to the Ubuntu client:
+
+   ```bash
+   scp root@192.168.168.172:/root/Sources/cm5audio/certs/server.crt /tmp/cm5audio.crt
+   ```
+
+2. From the normal desktop user account—the same account that runs Brave/Chromium—run the helper. Do **not** run it after `sudo su -`. If the project is not checked out on the client, copy the helper too:
+
+   ```bash
+   scp root@192.168.168.172:/root/Sources/cm5audio/scripts/trust_server_cert.sh /tmp/trust_server_cert.sh
+   chmod +x /tmp/trust_server_cert.sh
+   /tmp/trust_server_cert.sh /tmp/cm5audio.crt
+   ```
+
+   The helper installs the certificate into both Ubuntu's system CA store and the current user's NSS database. It uses `P,,`, which trusts this exact peer certificate. If `certutil` is missing, install it and rerun:
+
+   ```bash
+   sudo apt install libnss3-tools
+   ```
+
+3. Fully exit Brave/Chromium and start it again. `killall brave` may be needed if background browser processes remain.
+
+4. Open the HTTPS client URL:
+
+   ```text
+   https://192.168.168.172:8182/client/index.html
+   ```
+
+5. Allow microphone access and confirm the WebSocket field is:
 
    ```text
    wss://192.168.168.172:8183/ws/audio
    ```
+
+You can verify the Ubuntu system trust before opening the browser:
+
+```bash
+curl -fsS https://192.168.168.172:8182/ -o /dev/null \
+  -w 'HTTPS trust works: HTTP %{http_code}\n'
+```
+
+Expected output is `HTTPS trust works: HTTP 200`. Do not open `https://192.168.168.172:8183/` as a webpage: port `8183` is a WSS endpoint and is not an HTTP server, so browser errors such as `ERR_RESPONSE_HEADERS_TRUNCATED` are expected.
 
 There is no separate browser permission for WebSockets. The page must be HTTPS and the audio endpoint must use WSS. For a permanent deployment, replace the self-signed certificate with one trusted by the client browser and containing the correct DNS name or IP SAN.
 
