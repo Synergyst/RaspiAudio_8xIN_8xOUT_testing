@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CM5 Audio — 8x8 Live DSP Control</title>
+    <style>
+        body { background:#0f111a; color:#eceff4; font-family:'Segoe UI',monospace; margin:20px; }
+        h1 { text-align:center; color:#88c0d0; margin-bottom:20px; }
+        .top-bar { display:flex; justify-content:space-between; align-items:center; max-width:1520px; margin:0 auto 15px; }
+        .clear-btn { background:#bf616a; color:#fff; border:0; padding:8px 16px; border-radius:4px; font-weight:bold; cursor:pointer; }
+        .dashboard { display:flex; flex-wrap:wrap; gap:20px; justify-content:center; }
+        .panel { background:#1a1c23; padding:20px; border-radius:10px; border:1px solid #2e3440; flex:1; min-width:480px; max-width:750px; }
+        h2 { color:#81a1c1; border-bottom:1px solid #3b4252; padding-bottom:8px; margin-top:0; }
+        .meter-grid { display:grid; grid-template-columns:repeat(8,1fr); gap:8px; }
+        .meter-col { display:flex; flex-direction:column; align-items:center; background:#121318; padding:8px 4px; border-radius:6px; border:1px solid #2e3440; }
+        .meter-label { font-size:11px; font-weight:bold; color:#88c0d0; margin-bottom:4px; }
+        .clip-led { width:12px; height:12px; border-radius:50%; background:#2e1a1e; border:1px solid #4c282e; margin-bottom:6px; cursor:pointer; }
+        .clip-led.active { background:#ff0033; border-color:#ff6688; box-shadow:0 0 8px #ff0033; }
+        .bar-container { position:relative; width:16px; height:120px; background:#2e3440; border-radius:3px; overflow:hidden; display:flex; align-items:flex-end; }
+        .bar-fill { width:100%; background:linear-gradient(to top,#a3be8c 0%,#a3be8c 60%,#ebcb8b 80%,#bf616a 100%); }
+        .peak-hold-marker { position:absolute; left:0; width:100%; height:2px; background:#fff; box-shadow:0 0 3px #fff; }
+        .db-readout { font-size:9px; color:#e5e9f0; margin:2px 0 0; text-align:center; }
+        .peak-readout { font-size:8px; color:#ebcb8b; margin-bottom:4px; text-align:center; }
+        .ch-graph { width:100%; height:45px; background:#0a0b0e; border-radius:3px; border:1px solid #2e3440; margin:4px 0; }
+        .gain-slider { width:100%; height:65px; writing-mode:bt-lr; -webkit-appearance:slider-vertical; margin:4px 0; }
+        .mute-btn { width:100%; font-size:9px; font-weight:bold; padding:3px 0; background:#3b4252; color:#d8dee9; border:0; border-radius:3px; cursor:pointer; }
+        .mute-btn.active { background:#bf616a; color:#fff; }
+        .gain-val { font-size:9px; color:#ebcb8b; margin-top:2px; }
+    </style>
+</head>
+<body>
+<div class="top-bar"><h1>CM5 Audio Engine — DSP Metering &amp; Peak Latching</h1><button class="clear-btn" onclick="clearAllClips()">RESET ALL CLIPS</button></div>
+<div class="dashboard"><div class="panel"><h2>Capture (ADC8x Channels 1–8)</h2><div class="meter-grid" id="cap-meters"></div></div><div class="panel"><h2>Playback (DAC8x Channels 1–8)</h2><div class="meter-grid" id="pb-meters"></div></div></div>
+<script>
+const HISTORY_LEN=60;
+const historyCap=Array.from({length:8},()=>new Array(HISTORY_LEN).fill(-60));
+const historyPb=Array.from({length:8},()=>new Array(HISTORY_LEN).fill(-60));
+function initMeters(id,type){const grid=document.getElementById(id);for(let c=0;c<8;c++){grid.innerHTML+=`<div class="meter-col"><div class="meter-label">CH${c+1}</div><div class="clip-led" id="${type}-clip-${c}" onclick="resetClip('${type}',${c})"></div><div class="bar-container"><div class="bar-fill" id="${type}-bar-${c}"></div><div class="peak-hold-marker" id="${type}-pk-${c}"></div></div><div class="db-readout" id="${type}-db-${c}">-60.0</div><div class="peak-readout" id="${type}-pkdb-${c}">P: -60.0</div><canvas class="ch-graph" id="${type}-cv-${c}"></canvas><input type="range" class="gain-slider" id="${type}-gain-${c}" min="0" max="2" step="0.02" value="1.0" oninput="sendControl('${type}',${c})"><div class="gain-val" id="${type}-gval-${c}">1.00x</div><button class="mute-btn" id="${type}-mute-${c}" onclick="toggleMute('${type}',${c})">MUTE</button></div>`;}}
+initMeters('cap-meters','capture');initMeters('pb-meters','playback');
+const muteStates={capture:new Array(8).fill(false),playback:new Array(8).fill(false)};
+function toggleMute(type,ch){muteStates[type][ch]=!muteStates[type][ch];document.getElementById(`${type}-mute-${ch}`).classList.toggle('active',muteStates[type][ch]);sendControl(type,ch);}
+function sendControl(type,ch){const gain=document.getElementById(`${type}-gain-${ch}`).value;const mute=muteStates[type][ch]?1:0;document.getElementById(`${type}-gval-${ch}`).innerText=parseFloat(gain).toFixed(2)+'x';fetch(`/api/control?type=${type}&ch=${ch}&gain=${gain}&mute=${mute}`,{method:'POST'});}
+function resetClip(type,ch){fetch(`/api/reset_clips?type=${type}&ch=${ch}`,{method:'POST'});}
+function clearAllClips(){fetch('/api/reset_clips?all=1',{method:'POST'});}
+function dbToPct(db){if(db<=-60)return 0;if(db>=0)return 100;return((db+60)/60)*100;}
+function draw(canvasId,history,color){const canvas=document.getElementById(canvasId);const ctx=canvas.getContext('2d');canvas.width=canvas.clientWidth;canvas.height=canvas.clientHeight;const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#2e3440';[-12,-36].forEach(db=>{const y=h-(dbToPct(db)/100*h);ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();});ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();history.forEach((db,x)=>{const px=x/(HISTORY_LEN-1)*w,py=h-(dbToPct(db)/100*h);if(x===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);});ctx.stroke();}
+async function fetchMeters(){try{const response=await fetch('/api/meters');if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();data.capture.forEach((ch,i)=>{document.getElementById(`capture-bar-${i}`).style.height=dbToPct(ch.rms_db)+'%';document.getElementById(`capture-pk-${i}`).style.bottom=dbToPct(ch.peak_hold_db)+'%';document.getElementById(`capture-db-${i}`).innerText=ch.rms_db.toFixed(1);document.getElementById(`capture-pkdb-${i}`).innerText='P:'+ch.peak_hold_db.toFixed(1);document.getElementById(`capture-clip-${i}`).classList.toggle('active',ch.clipped);historyCap[i].shift();historyCap[i].push(ch.rms_db);draw(`capture-cv-${i}`,historyCap[i],'#88c0d0');});data.playback.forEach((ch,i)=>{document.getElementById(`playback-bar-${i}`).style.height=dbToPct(ch.rms_db)+'%';document.getElementById(`playback-pk-${i}`).style.bottom=dbToPct(ch.peak_hold_db)+'%';document.getElementById(`playback-db-${i}`).innerText=ch.rms_db.toFixed(1);document.getElementById(`playback-pkdb-${i}`).innerText='P:'+ch.peak_hold_db.toFixed(1);document.getElementById(`playback-clip-${i}`).classList.toggle('active',ch.clipped);historyPb[i].shift();historyPb[i].push(ch.rms_db);draw(`playback-cv-${i}`,historyPb[i],'#a3be8c');});}catch(error){console.error('Failed to fetch meters:',error);}}
+fetchMeters();setInterval(fetchMeters,50);
+</script>
+</body>
+</html>
