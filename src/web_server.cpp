@@ -66,6 +66,25 @@ std::string read_dashboard() {
     return contents.str();
 }
 
+void append_meter_json(std::ostringstream& json,
+                       const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters,
+                       unsigned channels) {
+    channels = std::min(channels, CM5_MAX_CHANNELS);
+    json << '[';
+    for (unsigned i = 0; i < channels; ++i) {
+        const auto& meter = meters[i];
+        json << "{\"ch\":" << i
+             << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
+             << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+             << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
+             << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
+             << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
+             << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
+             << "}" << (i + 1 == channels ? "" : ",");
+    }
+    json << ']';
+}
+
 } // namespace
 
 WebClientSession::~WebClientSession() { stop_sender(); }
@@ -146,7 +165,7 @@ std::vector<AudioRoute> ClientManager::get_routes() const {
 }
 
 bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) const {
-    if (source && endpoint == "hardware/capture") return true;
+    if (source && (endpoint == "hardware/capture" || endpoint == "tone/generator")) return true;
     if (!source && endpoint == "hardware/playback") return true;
     const std::string prefix = "client/";
     const std::string suffix = source ? "/capture" : "/playback";
@@ -201,8 +220,10 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
     return true;
 }
 
-WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ClientManager& clientMgr, int httpPort, int wsPort)
-    : m_metrics(metrics), m_controls(controls), m_clientMgr(clientMgr), m_httpPort(httpPort), m_wsPort(wsPort) {}
+WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
+                     ClientManager& clientMgr, int httpPort, int wsPort)
+    : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr),
+      m_httpPort(httpPort), m_wsPort(wsPort) {}
 
 WebServer::~WebServer() { stop(); }
 
@@ -224,43 +245,84 @@ bool WebServer::start() {
         }
         server->set_mount_point("/client", "./web_client");
 
-        server->Get("/api/meters", [this](const httplib::Request&, httplib::Response& response) {
+        auto meters = [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;
             json << "{\"capture\":[";
             for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
                 const auto& meter = m_metrics.capture[i];
-                json << "{\"ch\":" << i << ",\"rms_db\":" << meter.rms_db.load()
-                     << ",\"peak_db\":" << meter.peak_db.load() << ",\"peak_hold_db\":" << meter.peak_hold_db.load()
-                     << ",\"clipped\":" << (meter.clipped.load() ? "true" : "false") << "}" << (i == 7 ? "" : ",");
+                json << "{\"ch\":" << i
+                     << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
+                     << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+                     << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
+                     << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
+                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
+                     << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
+                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
             }
             json << "],\"playback\":[";
             for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
                 const auto& meter = m_metrics.playback[i];
-                json << "{\"ch\":" << i << ",\"rms_db\":" << meter.rms_db.load()
-                     << ",\"peak_db\":" << meter.peak_db.load() << ",\"peak_hold_db\":" << meter.peak_hold_db.load()
-                     << ",\"clipped\":" << (meter.clipped.load() ? "true" : "false") << "}" << (i == 7 ? "" : ",");
+                json << "{\"ch\":" << i
+                     << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
+                     << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+                     << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
+                     << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
+                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
+                     << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
+                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+            }
+            json << "]}";
+            response.set_content(json.str(), "application/json");
+        };
+        server->Get("/api/meters", meters);
+        server->Get("/api/metrics", meters);
+        server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
+            std::ostringstream json;
+            json << "{\"capture\":[";
+            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                const auto& meter = m_metrics.capture[i];
+                json << "{\"ch\":" << i
+                     << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
+                     << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+            }
+            json << "],\"playback\":[";
+            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                const auto& meter = m_metrics.playback[i];
+                json << "{\"ch\":" << i
+                     << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
+                     << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
             }
             json << "]}";
             response.set_content(json.str(), "application/json");
         });
-        server->Get("/api/metrics", [this](const httplib::Request& request, httplib::Response& response) {
-            httplib::Request copy = request;
-            (void)copy;
+
+        server->Get("/api/tone", [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;
-            json << "{\"capture\":[";
-            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.capture[i];
-                json << "{\"ch\":" << i << ",\"rms_db\":" << meter.rms_db.load() << ",\"peak_db\":" << meter.peak_db.load()
-                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load() << ",\"clipped\":" << (meter.clipped.load() ? "true" : "false") << "}" << (i == 7 ? "" : ",");
-            }
-            json << "],\"playback\":[";
-            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.playback[i];
-                json << "{\"ch\":" << i << ",\"rms_db\":" << meter.rms_db.load() << ",\"peak_db\":" << meter.peak_db.load()
-                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load() << ",\"clipped\":" << (meter.clipped.load() ? "true" : "false") << "}" << (i == 7 ? "" : ",");
-            }
-            json << "]}";
+            json << "{\"enabled\":" << (m_tone.enabled.load() ? "true" : "false")
+                 << ",\"frequency_hz\":" << m_tone.frequency_hz.load()
+                 << ",\"amplitude\":" << m_tone.amplitude.load() << '}';
             response.set_content(json.str(), "application/json");
+        });
+        server->Post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
+            try {
+                if (request.has_param("enabled")) m_tone.enabled.store(query_bool(request, "enabled", false));
+                if (request.has_param("frequency")) {
+                    const float frequency = query_float(request, "frequency", -1.0f);
+                    if (!std::isfinite(frequency) || frequency < 1.0f || frequency > 20000.0f) throw std::invalid_argument("frequency must be 1..20000 Hz");
+                    m_tone.frequency_hz.store(frequency);
+                }
+                if (request.has_param("amplitude")) {
+                    const float amplitude = query_float(request, "amplitude", -1.0f);
+                    if (!std::isfinite(amplitude) || amplitude < 0.0f || amplitude > 1.0f) throw std::invalid_argument("amplitude must be 0..1");
+                    m_tone.amplitude.store(amplitude);
+                }
+                response.set_content("{\"status\":\"ok\"}", "application/json");
+            } catch (const std::exception& error) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
+            }
         });
 
         server->Get("/api/clients", [this](const httplib::Request&, httplib::Response& response) {
@@ -270,8 +332,13 @@ bool WebServer::start() {
             for (size_t i = 0; i < sessions.size(); ++i) {
                 const auto& s = sessions[i];
                 json << "{\"id\":" << s->id << ",\"ip\":\"" << json_escape(s->remote_ip)
-                     << "\",\"input_channels\":" << s->input_channels.load() << ",\"output_channels\":" << s->output_channels.load() << "}";
-                if (i + 1 != sessions.size()) json << ',';
+                     << "\",\"input_channels\":" << s->input_channels.load()
+                     << ",\"output_channels\":" << s->output_channels.load()
+                     << ",\"input_meters\":";
+                append_meter_json(json, s->input_metrics, s->input_channels.load());
+                json << ",\"output_meters\":";
+                append_meter_json(json, s->output_metrics, s->output_channels.load());
+                json << "}" << (i + 1 == sessions.size() ? "" : ",");
             }
             json << "]}";
             response.set_content(json.str(), "application/json");
@@ -281,7 +348,7 @@ bool WebServer::start() {
             const auto sessions = m_clientMgr.get_active_sessions();
             const auto routes = m_clientMgr.get_routes();
             std::ostringstream json;
-            json << "{\"revision\":1,\"endpoints\":[{\"id\":\"hardware/capture\",\"direction\":\"source\",\"channels\":8},{\"id\":\"hardware/playback\",\"direction\":\"destination\",\"channels\":8}";
+            json << "{\"revision\":1,\"endpoints\":[{\"id\":\"hardware/capture\",\"direction\":\"source\",\"channels\":8},{\"id\":\"tone/generator\",\"direction\":\"source\",\"channels\":8},{\"id\":\"hardware/playback\",\"direction\":\"destination\",\"channels\":8}";
             for (const auto& s : sessions) {
                 json << ",{\"id\":\"client/" << s->id << "/capture\",\"direction\":\"source\",\"channels\":" << s->input_channels.load() << "}"
                      << ",{\"id\":\"client/" << s->id << "/playback\",\"direction\":\"destination\",\"channels\":" << s->output_channels.load() << "}";

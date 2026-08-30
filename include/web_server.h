@@ -1,6 +1,7 @@
 #ifndef WEB_SERVER_H
 #define WEB_SERVER_H
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -17,6 +18,10 @@ constexpr unsigned CM5_MAX_CHANNELS = 8;
 constexpr unsigned CM5_MAX_AUDIO_FRAMES = 4096;
 
 struct ChannelMeter {
+    // Latest unscaled sample observed at the endpoint. Capture is the raw
+    // device input; playback is the final sample placed in the device output buffer.
+    std::atomic<float> raw_value{0.0f};
+    std::atomic<float> raw_peak{0.0f};
     std::atomic<float> rms_db{-60.0f};
     std::atomic<float> peak_db{-60.0f};
     std::atomic<float> peak_hold_db{-60.0f};
@@ -36,6 +41,12 @@ struct AudioMetrics {
 struct AudioControls {
     std::array<ChannelControl, CM5_MAX_CHANNELS> capture;
     std::array<ChannelControl, CM5_MAX_CHANNELS> playback;
+};
+
+struct ToneControls {
+    std::atomic<bool> enabled{false};
+    std::atomic<float> frequency_hz{440.0f};
+    std::atomic<float> amplitude{0.2f};
 };
 
 struct PcmRingBuffer {
@@ -87,6 +98,8 @@ struct WebClientSession {
     PcmRingBuffer outgoing_rb;
     std::vector<float> input_block;
     std::vector<float> output_block;
+    std::array<ChannelMeter, CM5_MAX_CHANNELS> input_metrics;
+    std::array<ChannelMeter, CM5_MAX_CHANNELS> output_metrics;
     std::vector<float> packet_block;
     std::atomic<bool> active{true};
     std::thread sender_thread;
@@ -130,8 +143,8 @@ private:
 
 class WebServer {
 public:
-    WebServer(AudioMetrics& metrics, AudioControls& controls, ClientManager& clientMgr,
-              int httpPort = 8182, int wsPort = 8183);
+    WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
+              ClientManager& clientMgr, int httpPort = 8182, int wsPort = 8183);
     ~WebServer();
     bool start();
     void stop();
@@ -139,6 +152,7 @@ public:
 private:
     AudioMetrics& m_metrics;
     AudioControls& m_controls;
+    ToneControls& m_tone;
     ClientManager& m_clientMgr;
     int m_httpPort;
     int m_wsPort;
