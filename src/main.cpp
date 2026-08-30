@@ -1,4 +1,4 @@
-#include "../miniaudio/miniaudio.h"
+#include "miniaudio.h"
 #include "web_server.h"
 #include <iostream>
 #include <cstring>
@@ -12,6 +12,7 @@
 std::atomic<bool> g_running(true);
 AudioMetrics g_metrics;
 AudioControls g_controls;
+ClientManager g_clientMgr;
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
@@ -42,45 +43,61 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         pb_gains[c] = pb_mute ? 0.0f : g_controls.playback[c].gain.load(std::memory_order_relaxed);
     }
 
+    // 1. Process Hardware Inputs & DSP
     float in_sum_sq[8] = {0};
     float in_peak[8]   = {0};
     float out_sum_sq[8] = {0};
     float out_peak[8]  = {0};
 
+    std::vector<float> client_monitor_buf(frameCount * 2, 0.0f);
+
     for (ma_uint32 i = 0; i < frameCount; ++i) {
         for (int c = 0; c < 8; ++c) {
             float raw_in = in[i * 8 + c];
-
-            // 1. Software Capture DSP (Gain / Mute)
             float proc_in = raw_in * cap_gains[c];
 
-            // Check clipping on capture
             float abs_in = std::abs(proc_in);
-            if (abs_in >= 0.999f) {
-                g_metrics.capture[c].clipped.store(true, std::memory_order_relaxed);
-            }
+            if (abs_in >= 0.999f) g_metrics.capture[c].clipped.store(true, std::memory_order_relaxed);
 
             in_sum_sq[c] += proc_in * proc_in;
             if (abs_in > in_peak[c]) in_peak[c] = abs_in;
 
-            // 2. Software Playback DSP (Gain / Mute)
             float final_out = proc_in * pb_gains[c];
             out[i * 8 + c] = final_out;
 
-            // Check clipping on playback
             float abs_out = std::abs(final_out);
-            if (abs_out >= 0.999f) {
-                g_metrics.playback[c].clipped.store(true, std::memory_order_relaxed);
-            }
+            if (abs_out >= 0.999f) g_metrics.playback[c].clipped.store(true, std::memory_order_relaxed);
 
             out_sum_sq[c] += final_out * final_out;
             if (abs_out > out_peak[c]) out_peak[c] = abs_out;
         }
+
+        // Tap Channels 1 & 2 for Web Client Monitoring (Stereo L/R)
+        client_monitor_buf[i * 2 + 0] = out[i * 8 + 0];
+        client_monitor_buf[i * 2 + 1] = out[i * 8 + 1];
     }
 
-    // Update global atomic metrics & peak hold values
+    // 2. Mix Active Web Client Microphone Streams into Hardware Playback CH1
+    auto activeSessions = g_clientMgr.get_active_sessions();
+    for (auto& session : activeSessions) {
+        if (!session->active) continue;
+
+        // Push stereo monitor audio to client speakers
+        session->outgoing_rb.write(client_monitor_buf.data(), frameCount * 2 * sizeof(float));
+
+        // Pull client mic audio and mix into hardware output CH1
+        std::vector<float> micBuf(frameCount, 0.0f);
+        size_t reqBytes = frameCount * sizeof(float);
+        size_t readBytes = session->incoming_rb.read(micBuf.data(), reqBytes);
+        size_t readFrames = readBytes / sizeof(float);
+
+        for (size_t i = 0; i < readFrames; ++i) {
+            out[i * 8 + 0] += micBuf[i];
+        }
+    }
+
+    // 3. Update Peak Meters & Hold Values
     for (int c = 0; c < 8; ++c) {
-        // Capture Peak & Peak Hold Decay
         float in_rms = std::sqrt(in_sum_sq[c] / frameCount);
         float in_peak_db = lin_to_db(in_peak[c]);
         g_metrics.capture[c].rms_db.store(lin_to_db(in_rms), std::memory_order_relaxed);
@@ -90,11 +107,9 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         if (in_peak_db > cap_cur_hold) {
             g_metrics.capture[c].peak_hold_db.store(in_peak_db, std::memory_order_relaxed);
         } else {
-            // Decay peak hold marker by 0.15 dB per buffer block
             g_metrics.capture[c].peak_hold_db.store(std::max(-60.0f, cap_cur_hold - 0.15f), std::memory_order_relaxed);
         }
 
-        // Playback Peak & Peak Hold Decay
         float out_rms = std::sqrt(out_sum_sq[c] / frameCount);
         float out_peak_db = lin_to_db(out_peak[c]);
         g_metrics.playback[c].rms_db.store(lin_to_db(out_rms), std::memory_order_relaxed);
@@ -113,11 +128,12 @@ int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    std::cout << "Starting CM5 Audio Engine..." << std::endl;
+    std::cout << "Starting CM5 Audio Engine with WASM Audio Bridge..." << std::endl;
 
-    WebServer webServer(g_metrics, g_controls, 8182);
+    WebServer webServer(g_metrics, g_controls, g_clientMgr, 8182);
     if (!webServer.start()) {
-        std::cerr << "Failed to start HTTP server!" << std::endl;
+        std::cerr << "Failed to start HTTP/WS server!" << std::endl;
+        return -1;
     }
 
     ma_device_config deviceConfig = ma_device_config_init(ma_device_type_duplex);
@@ -142,7 +158,9 @@ int main() {
         return -1;
     }
 
-    std::cout << "Operational. Metering at http://192.168.168.172:8182/" << std::endl;
+    std::cout << "Operational." << std::endl;
+    std::cout << " - Dashboard:   http://192.168.168.172:8182/" << std::endl;
+    std::cout << " - WASM Client:  http://192.168.168.172:8182/client/index.html" << std::endl;
 
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

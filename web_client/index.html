@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CM5 Web Audio Terminal</title>
+    <style>
+        body {
+            background: #0f111a;
+            color: #eceff4;
+            font-family: 'Segoe UI', monospace;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .card {
+            background: #1a1c23;
+            border: 1px solid #2e3440;
+            border-radius: 12px;
+            padding: 30px;
+            width: 420px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }
+        h2 {
+            color: #88c0d0;
+            margin-top: 0;
+            text-align: center;
+            border-bottom: 1px solid #3b4252;
+            padding-bottom: 12px;
+        }
+        .field {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-size: 12px;
+            color: #d8dee9;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            background: #121318;
+            border: 1px solid #3b4252;
+            border-radius: 6px;
+            color: #ebcb8b;
+            font-family: monospace;
+            box-sizing: border-box;
+        }
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .btn-start { background: #a3be8c; color: #1e222a; }
+        .btn-stop  { background: #bf616a; color: #ffffff; }
+
+        .status-box {
+            margin-top: 20px;
+            padding: 12px;
+            background: #121318;
+            border-radius: 6px;
+            border-left: 4px solid #4c566a;
+            font-size: 12px;
+        }
+        .status-box.active { border-left-color: #a3be8c; color: #a3be8c; }
+        .status-box.error  { border-left-color: #bf616a; color: #bf616a; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Client Audio Terminal</h2>
+
+    <div class="field">
+        <label for="ws-url">CM5 Server WebSocket URL</label>
+        <input type="text" id="ws-url" value="">
+    </div>
+
+    <div class="btn-group">
+        <button id="btn-start" class="btn-start" onclick="startAudio()" disabled>START AUDIO</button>
+        <button id="btn-stop" class="btn-stop" onclick="stopAudio()" disabled>STOP AUDIO</button>
+    </div>
+
+    <div id="status" class="status-box">Loading WASM module...</div>
+</div>
+
+<script>
+    // Automatically set default WebSocket URL based on host
+    const defaultWsHost = location.hostname ? location.hostname : '192.168.168.172';
+    document.getElementById('ws-url').value = `ws://${defaultWsHost}:8182/ws/audio`;
+
+    let start_web_audio = null;
+    let stop_web_audio = null;
+
+    // Emscripten Module Initialization Callback
+    var Module = {
+        onRuntimeInitialized: function() {
+            start_web_audio = Module.cwrap('start_web_audio', 'number', ['string']);
+            stop_web_audio = Module.cwrap('stop_web_audio', null, []);
+
+            document.getElementById('btn-start').disabled = false;
+            updateStatus('Ready to connect. Click START AUDIO.', false);
+        }
+    };
+
+    function updateStatus(text, isActive, isError = false) {
+        const box = document.getElementById('status');
+        box.innerText = text;
+        box.className = 'status-box' + (isActive ? ' active' : '') + (isError ? ' error' : '');
+    }
+
+    function startAudio() {
+        const url = document.getElementById('ws-url').value.trim();
+        if (!url) {
+            updateStatus('Please enter a valid WebSocket URL.', false, true);
+            return;
+        }
+
+        updateStatus('Initializing audio hardware and WebSocket...', false);
+
+        try {
+            const res = start_web_audio(url);
+            if (res === 0) {
+                document.getElementById('btn-start').disabled = true;
+                document.getElementById('btn-stop').disabled = false;
+                updateStatus('AUDIO ENGINE LIVE — Mic capturing & streaming PCM', true);
+            } else {
+                updateStatus(`Failed to start audio engine (Code ${res})`, false, true);
+            }
+        } catch (e) {
+            updateStatus(`Execution error: ${e.message}`, false, true);
+        }
+    }
+
+    function stopAudio() {
+        if (stop_web_audio) {
+            stop_web_audio();
+            document.getElementById('btn-start').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+            updateStatus('Engine stopped.', false);
+        }
+    }
+</script>
+
+<script src="dist/client_audio.js"></script>
+</body>
+</html>

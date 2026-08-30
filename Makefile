@@ -1,20 +1,23 @@
-CXX      = g++
-CXXFLAGS = -O2 -Wall -std=c++17 -I../miniaudio -I../cpp-httplib
-LDFLAGS  = -lpthread -lm -ldl -lasound
+CXX = g++
+CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -Wall -pthread
+LDFLAGS = -L/usr/local/lib -lixwebsocket -lssl -lcrypto -lz -lpthread
 
-TARGET   = cm5audio
-SRCS     = main.cpp miniaudio_impl.cpp web_server.cpp
-OBJS     = $(SRCS:.cpp=.o)
+SRCS = src/main.cpp src/miniaudio_impl.cpp src/web_server.cpp
+OBJS = $(SRCS:src/%.cpp=build/%.o)
+TARGET = cm5audio
 
-all: $(TARGET)
+all: build $(TARGET)
 
-$(TARGET): $(OBJS)
-	$(CXX) $(OBJS) -o $(TARGET) $(LDFLAGS)
+build:
+	mkdir -p build
 
-%.o: %.cpp
+build/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+$(TARGET): $(OBJS)
+	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -rf build $(TARGET)
 
 .PHONY: all clean
