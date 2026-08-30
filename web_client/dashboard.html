@@ -2,49 +2,395 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CM5 Audio Network Patchbay</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:18px;background:#0f111a;color:#eceff4;font:14px 'Segoe UI',sans-serif}h1{text-align:center;color:#88c0d0;margin:8px 0 18px}.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;max-width:1500px;margin:0 auto 14px}.toolbar button,.route-form button,.route button{background:#4c566a;color:#fff;border:0;border-radius:4px;padding:7px 11px;cursor:pointer}.toolbar button.primary,.route-form button{background:#5e81ac}.toolbar button:disabled,.route-form button:disabled,.route button:disabled{opacity:.45;cursor:wait}.panel{background:#1a1c23;border:1px solid #2e3440;border-radius:9px;padding:14px;margin:0 auto 14px;max-width:1500px}.panel h2{margin:0 0 10px;color:#81a1c1;border-bottom:1px solid #3b4252;padding-bottom:7px}.clients{display:flex;flex-wrap:wrap;gap:10px}.client{min-width:210px;background:#121318;border:1px solid #434c5e;border-radius:7px;padding:10px}.client.connected{border-color:#a3be8c}.client h3{margin:0 0 7px;color:#a3be8c}.client small{color:#d8dee9}.endpoint{font-family:monospace;color:#88c0d0;margin-top:6px}.route-form{display:flex;flex-wrap:wrap;gap:10px;align-items:end}.route-form label{display:flex;flex-direction:column;gap:3px;color:#d8dee9;font-size:12px}.route-form select,.route-form input{background:#121318;border:1px solid #4c566a;color:#eceff4;padding:7px;border-radius:4px;min-width:240px}.route-form select:focus,.route-form input:focus{outline:2px solid #88c0d0;outline-offset:1px}.route-form input{min-width:100px;width:110px}.routes{display:grid;gap:6px}.route{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:#121318;border-radius:5px;padding:8px;font-family:monospace}.route .edge{flex:1;min-width:260px;color:#d8dee9}.route .muted{color:#bf616a}.route input{width:90px;background:#1a1c23;border:1px solid #4c566a;color:#eceff4;border-radius:4px;padding:5px}.meters{display:flex;flex-wrap:wrap;gap:10px}.meter{background:#121318;border:1px solid #2e3440;border-radius:6px;padding:8px;min-width:90px;text-align:center}.bar{height:7px;background:#2e3440;border-radius:3px;overflow:hidden;margin:7px 0}.fill{height:100%;background:#a3be8c;width:0}.meter b{color:#88c0d0}.meter small{display:block;color:#ebcb8b}.ch-graph{display:block;width:100%;height:42px;margin:7px 0 3px;background:#0a0b0e;border:1px solid #2e3440;border-radius:3px}.hardware{display:grid;grid-template-columns:1fr 1fr;gap:14px}.hint{color:#d8dee9;display:block;margin-top:8px}.raw-toggle{display:flex;align-items:center;gap:8px;margin:8px 0;color:#d8dee9}.raw-toggle input{width:18px;height:18px;accent-color:#a3be8c}.raw-state{display:inline-block;padding:3px 7px;border-radius:4px;background:#4c566a;color:#fff;font-family:monospace;font-weight:bold}.raw-state.on{background:#a3be8c;color:#1e222a}.raw-value{font-family:monospace;color:#ebcb8b;font-size:11px;display:none;margin-top:3px}.show-raw .raw-value{display:block}.show-raw .meter{border-color:#a3be8c}.show-raw .client-meter{color:#ebcb8b}.show-raw .meter::before{content:'RAW';display:block;color:#a3be8c;font:bold 9px monospace;letter-spacing:1px}.client-meters{display:grid;grid-template-columns:1fr 1fr;gap:10px}.client-meter-group h4{margin:3px 0;color:#81a1c1;font-size:11px}.client-meter{display:grid;grid-template-columns:42px 1fr 58px;gap:5px;align-items:center;font:10px monospace;margin:4px 0}.client-meter .bar{margin:0}.client-meter .raw-value{grid-column:2/4;font-size:9px}@media(max-width:700px){.hardware,.client-meters{grid-template-columns:1fr}.route-form select{min-width:160px}}
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 18px; background: #0f111a; color: #eceff4; font: 14px 'Segoe UI', sans-serif; }
+h1 { text-align: center; color: #88c0d0; margin: 8px 0 18px; }
+.toolbar, .panel { max-width: 1500px; margin-left: auto; margin-right: auto; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.toolbar button, .route-form button, .route button { background: #4c566a; color: #fff; border: 0; border-radius: 4px; padding: 7px 11px; cursor: pointer; }
+.toolbar button.primary, .route-form button { background: #5e81ac; }
+button:disabled { opacity: .45; cursor: wait; }
+.panel { background: #1a1c23; border: 1px solid #2e3440; border-radius: 9px; padding: 14px; margin-bottom: 14px; }
+.panel h2 { margin: 0 0 10px; color: #81a1c1; border-bottom: 1px solid #3b4252; padding-bottom: 7px; }
+.clients { display: flex; flex-wrap: wrap; gap: 10px; }
+.client { min-width: 210px; background: #121318; border: 1px solid #434c5e; border-radius: 7px; padding: 10px; }
+.client.connected { border-color: #a3be8c; }
+.client h3 { margin: 0 0 7px; color: #a3be8c; }
+.client small { color: #d8dee9; }
+.endpoint { margin-top: 6px; color: #88c0d0; font-family: monospace; }
+.route-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.route-form label { display: flex; flex-direction: column; gap: 3px; color: #d8dee9; font-size: 12px; }
+.route-form select, .route-form input { min-width: 240px; background: #121318; border: 1px solid #4c566a; color: #eceff4; padding: 7px; border-radius: 4px; }
+.route-form select:focus, .route-form input:focus { outline: 2px solid #88c0d0; outline-offset: 1px; }
+.route-form input { min-width: 100px; width: 110px; }
+.routes { display: grid; gap: 6px; }
+.route { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: #121318; border-radius: 5px; padding: 8px; font-family: monospace; }
+.route .edge { flex: 1; min-width: 260px; color: #d8dee9; }
+.route .muted { color: #bf616a; }
+.route input { width: 90px; background: #1a1c23; border: 1px solid #4c566a; color: #eceff4; border-radius: 4px; padding: 5px; }
+.meters { display: flex; flex-wrap: wrap; gap: 10px; }
+.meter { width: 90px; min-width: 90px; background: #121318; border: 1px solid #2e3440; border-radius: 6px; padding: 8px; text-align: center; }
+.meter b { color: #88c0d0; }
+.meter small { display: block; color: #ebcb8b; }
+.bar { height: 7px; background: #2e3440; border-radius: 3px; overflow: hidden; margin: 7px 0; }
+.fill { height: 100%; width: 0; background: #a3be8c; }
+.ch-graph { display: block; width: 72px; height: 42px; margin: 7px auto 3px; background: #0a0b0e; border: 1px solid #2e3440; border-radius: 3px; }
+.hardware { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.hint { display: block; margin-top: 8px; color: #d8dee9; }
+.raw-toggle { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: #d8dee9; }
+.raw-toggle input { width: 18px; height: 18px; accent-color: #a3be8c; }
+.raw-state { display: inline-block; padding: 3px 7px; border-radius: 4px; background: #4c566a; color: #fff; font: bold 12px monospace; }
+.raw-state.on { background: #a3be8c; color: #1e222a; }
+.raw-values { display: none !important; margin-top: 3px; color: #ebcb8b; font: 11px monospace; }
+.raw-values.visible { display: block !important; }
+.raw-visible .meter { border-color: #a3be8c; }
+.raw-visible .raw-badge { display: block; color: #a3be8c; font: bold 9px monospace; letter-spacing: 1px; }
+.raw-badge { display: none; }
+.client-meter-groups { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.client-meter-group { flex: 0 0 auto; }
+.client-meter-group h4 { margin: 3px 0 6px; color: #81a1c1; font-size: 11px; }
+.client-meter-group .meters { flex-wrap: nowrap; }
+.client-meter-group .meter { width: 90px; min-width: 90px; }
+@media (max-width: 700px) { .hardware { grid-template-columns: 1fr; } .client-meter-groups { flex-direction: column; } .client-meter-group .meters { flex-wrap: wrap; } .route-form select { min-width: 160px; } }
 </style>
 </head>
 <body>
 <h1>CM5 Audio Network Patchbay</h1>
-<div class="toolbar"><button class="primary" id="refresh" onclick="refreshAll()">REFRESH</button><button onclick="resetAll()">RESET CLIPS</button><span id="status">Loading graph...</span></div>
-<section class="panel"><h2>Connected Clients</h2><div id="clients" class="clients"><span>None connected</span></div></section>
-<section class="panel"><h2>Tone Injection</h2><div class="route-form"><label>Enabled<select id="tone-enabled"><option value="0">OFF</option><option value="1">ON</option></select></label><label>Frequency (Hz)<input id="tone-frequency" type="number" min="1" max="20000" step="1" value="440"></label><label>Amplitude<input id="tone-amplitude" type="number" min="0" max="1" step="0.01" value="0.2"></label><button id="tone-apply" onclick="applyTone()">APPLY TONE</button></div><small class="hint">The tone generator exposes 8 source channels as <code>tone/generator</code>. Enable it, APPLY TONE, then route any tone channel normally.</small></section>
-<section class="panel"><h2>Create Route</h2><div class="route-form"><label>Source<select id="source"></select></label><label>Destination<select id="destination"></select></label><label>Gain<input id="route-gain" type="number" min="0" max="8" step="0.01" value="1"></label><button id="connect" onclick="addRoute()">CONNECT</button></div><small class="hint">Each connection is one source channel to one destination channel. Multiple connections may feed one channel; one source may feed many destinations. Selections are preserved during automatic refreshes.</small></section>
-<section class="panel"><h2>Active Routes</h2><div id="routes" class="routes"><span>None</span></div></section>
-<section class="panel"><h2>Hardware Meters</h2><label class="raw-toggle"><input id="show-raw" type="checkbox"><span>Show numeric raw port values (latest sample / block peak)</span><span id="raw-state" class="raw-state">OFF — HIDDEN</span></label><div id="meter-root" class="hardware"><div><h3>Capture / ADC8x</h3><div id="capture" class="meters"></div></div><div><h3>Playback / DAC8x</h3><div id="playback" class="meters"></div></div></div><small class="hint">OFF hides yellow raw values. ON shows a RAW badge plus current numeric sample and block peak in every hardware channel card.</small></section>
-<section class="panel"><h2>Client Meters</h2><div id="client-meters"><span>None connected</span></div><small class="hint">Input meters show client audio entering the server. Output meters show routed audio queued for the client.</small></section>
+<div class="toolbar">
+    <button class="primary" onclick="refreshAll()">REFRESH</button>
+    <button onclick="resetAll()">RESET CLIPS</button>
+    <span id="status">Loading graph...</span>
+</div>
+
+<section class="panel">
+    <h2>Connected Clients</h2>
+    <div id="clients" class="clients"><span>None connected</span></div>
+</section>
+
+<section class="panel">
+    <h2>Tone Injection</h2>
+    <div class="route-form">
+        <label>Enabled<select id="tone-enabled"><option value="0">OFF</option><option value="1">ON</option></select></label>
+        <label>Frequency (Hz)<input id="tone-frequency" type="number" min="1" max="20000" step="1" value="440"></label>
+        <label>Amplitude<input id="tone-amplitude" type="number" min="0" max="1" step="0.01" value="0.2"></label>
+        <button id="tone-apply" onclick="applyTone()">APPLY TONE</button>
+    </div>
+    <small class="hint">The tone generator exposes 8 source channels as <code>tone/generator</code>. Enable it, APPLY TONE, then route any tone channel normally.</small>
+</section>
+
+<section class="panel">
+    <h2>Create Route</h2>
+    <div class="route-form">
+        <label>Source<select id="source"></select></label>
+        <label>Destination<select id="destination"></select></label>
+        <label>Gain<input id="route-gain" type="number" min="0" max="8" step="0.01" value="1"></label>
+        <button id="connect" onclick="addRoute()">CONNECT</button>
+    </div>
+    <small class="hint">Each connection is one source channel to one destination channel. Multiple connections may feed one channel; one source may feed many destinations. Selections are preserved during automatic refreshes.</small>
+</section>
+
+<section class="panel">
+    <h2>Active Routes</h2>
+    <div id="routes" class="routes"><span>None</span></div>
+</section>
+
+<section class="panel">
+    <h2>Hardware Meters</h2>
+    <label class="raw-toggle">
+        <input id="show-raw" type="checkbox">
+        <span>Show numeric raw port values (latest sample / block peak)</span>
+        <span id="raw-state" class="raw-state">OFF — HIDDEN</span>
+    </label>
+    <div id="hardware-meters" class="hardware">
+        <div><h3>Capture / ADC8x</h3><div id="capture" class="meters"></div></div>
+        <div><h3>Playback / DAC8x</h3><div id="playback" class="meters"></div></div>
+    </div>
+    <small class="hint">OFF hides all raw values. ON visibly marks every hardware card RAW and shows its current sample and block peak.</small>
+</section>
+
+<section class="panel">
+    <h2>Client Meters</h2>
+    <div id="client-meters"><span>None connected</span></div>
+    <small class="hint">Client channel cards use the same compact format as the hardware cards. Input is client → server; output is server → client.</small>
+</section>
+
 <script>
-const $=id=>document.getElementById(id);let graph={endpoints:[],routes:[]};let graphSignature='';let refreshBusy=false;let mutationBusy=false;let rawVisible=false;let toneDirty=false;const routeDrafts=new Map();const HISTORY_LEN=60;const meterHistory={capture:Array.from({length:8},()=>[]),playback:Array.from({length:8},()=>[])};
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function endpointLabel(e,ch){return `${e.id} / CH${ch+1}`;}
-function endpointMap(){return Object.fromEntries(graph.endpoints.map(e=>[e.id,e]));}
-function selectedValue(id){return $(id).value;}
-function setOptions(id,items,old){const select=$(id),values=items.map(x=>x.value);select.innerHTML=items.map(x=>`<option value="${esc(x.value)}">${esc(x.label)}</option>`).join('');if(values.includes(old))select.value=old;else if(values.length)select.selectedIndex=0;}
-function renderClients(data){$('clients').innerHTML=data.clients.length?data.clients.map(c=>`<div class="client connected"><h3>Client #${c.id}</h3><small>${esc(c.ip||'unknown')}</small><div class="endpoint">INPUT: ${c.input_channels} ch</div><div class="endpoint">OUTPUT: ${c.output_channels} ch</div></div>`).join(''):'<span>None connected</span>';renderClientMeters(data);}
-function clientMeterHtml(m,i){return `<div class="client-meter"><span>CH${i+1}</span><div class="bar"><div class="fill" style="width:${dbPct(m.rms_db)}%;background:#88c0d0"></div></div><span>${Number(m.rms_db||-60).toFixed(1)}dB</span><small class="raw-value">raw ${Number(m.raw_value||0).toFixed(5)} / peak ${Number(m.raw_peak||0).toFixed(5)}</small></div>`;}
-function renderClientMeters(data){$('client-meters').innerHTML=data.clients.length?data.clients.map(c=>`<div class="client"><h3>Client #${c.id}</h3><div class="client-meters"><div class="client-meter-group"><h4>CLIENT INPUT → SERVER</h4>${(c.input_meters||[]).map(clientMeterHtml).join('')}</div><div class="client-meter-group"><h4>SERVER → CLIENT OUTPUT</h4>${(c.output_meters||[]).map(clientMeterHtml).join('')}</div></div></div>`).join(''):'<span>None connected</span>';setRawVisibility(rawVisible);}
-function renderSelectors(){const oldSource=selectedValue('source'),oldDestination=selectedValue('destination');const sources=graph.endpoints.filter(e=>e.direction==='source').flatMap(e=>Array.from({length:e.channels},(_,c)=>({value:`${e.id}|${c}`,label:endpointLabel(e,c)})));const destinations=graph.endpoints.filter(e=>e.direction==='destination').flatMap(e=>Array.from({length:e.channels},(_,c)=>({value:`${e.id}|${c}`,label:endpointLabel(e,c)})));setOptions('source',sources,oldSource);setOptions('destination',destinations,oldDestination);}
-function renderRoutes(){const em=endpointMap();const activeIds=new Set(graph.routes.map(r=>String(r.id)));for(const id of routeDrafts.keys())if(!activeIds.has(id))routeDrafts.delete(id);$('routes').innerHTML=graph.routes.length?graph.routes.map(r=>{const a=em[r.source],b=em[r.destination],src=a?endpointLabel(a,r.source_channel):`${r.source} / CH${r.source_channel+1}`,dst=b?endpointLabel(b,r.destination_channel):`${r.destination} / CH${r.destination_channel+1}`,draft=routeDrafts.get(String(r.id)),gain=draft===undefined?Number(r.gain).toFixed(2):esc(draft);return `<div class="route"><span class="edge ${r.enabled?'':'muted'}">#${r.id}: ${esc(src)} → ${esc(dst)}</span><label>Gain <input id="gain-${r.id}" data-route-gain="${r.id}" type="number" min="0" max="8" step="0.01" value="${gain}"></label><button data-action="toggle" data-id="${r.id}" data-enabled="${!r.enabled}">${r.enabled?'MUTE':'ENABLE'}</button><button data-action="save" data-id="${r.id}" data-enabled="${r.enabled}">SAVE GAIN</button><button data-action="delete" data-id="${r.id}">UNROUTE</button></div>`;}).join(''):'<span>None</span>';}
-async function loadGraph(){const r=await fetch('/api/graph',{cache:'no-store'});if(!r.ok)throw Error(r.status);const next=await r.json(),signature=JSON.stringify(next);if(signature!==graphSignature){graph=next;graphSignature=signature;renderSelectors();renderRoutes();}$('status').textContent=`${graph.endpoints.length} endpoints, ${graph.routes.length} routes`;}
-async function addRoute(){if(mutationBusy)return;const sourceValue=$('source').value,destinationValue=$('destination').value;if(!sourceValue||!destinationValue)return;const [source,source_ch]=sourceValue.split('|'),[destination,destination_ch]=destinationValue.split('|');mutationBusy=true;$('connect').disabled=true;try{const r=await fetch(`/api/routes?source=${encodeURIComponent(source)}&source_ch=${source_ch}&destination=${encodeURIComponent(destination)}&destination_ch=${destination_ch}&gain=${encodeURIComponent($('route-gain').value)}`,{method:'POST'});if(!r.ok)alert(await r.text());else{graphSignature='';await loadGraph();}}finally{mutationBusy=false;$('connect').disabled=false;}}
-async function routeAction(id,action,enabled){if(mutationBusy)return;mutationBusy=true;try{let r;if(action==='delete')r=await fetch(`/api/routes/${id}`,{method:'DELETE'});else r=await fetch(`/api/routes/update?id=${id}&enabled=${enabled?1:0}&gain=${encodeURIComponent($(`gain-${id}`).value)}`,{method:'POST'});if(!r.ok)alert(await r.text());else{routeDrafts.delete(String(id));graphSignature='';await loadGraph();}}finally{mutationBusy=false;}}
-$('routes').addEventListener('input',e=>{const input=e.target.closest('input[data-route-gain]');if(input)routeDrafts.set(input.dataset.routeGain,input.value);});$('routes').addEventListener('click',e=>{const button=e.target.closest('button[data-action]');if(button)routeAction(Number(button.dataset.id),button.dataset.action,button.dataset.enabled==='true');});
-function setRawVisibility(visible){rawVisible=visible;$('meter-root').classList.toggle('show-raw',visible);$('client-meters').classList.toggle('show-raw',visible);const state=$('raw-state');state.textContent=visible?'ON — VISIBLE':'OFF — HIDDEN';state.classList.toggle('on',visible);$('show-raw').checked=visible;}
-$('show-raw').addEventListener('change',e=>setRawVisibility(e.target.checked));
-async function applyTone(){const button=$('tone-apply');button.disabled=true;try{const r=await fetch(`/api/tone?enabled=${$('tone-enabled').value}&frequency=${encodeURIComponent($('tone-frequency').value)}&amplitude=${encodeURIComponent($('tone-amplitude').value)}`,{method:'POST'});if(!r.ok)alert(await r.text());else toneDirty=false;}finally{button.disabled=false;}}
-async function loadTone(){if(toneDirty)return;try{const t=await(await fetch('/api/tone',{cache:'no-store'})).json();if(toneDirty)return;$('tone-enabled').value=t.enabled?'1':'0';$('tone-frequency').value=t.frequency_hz;$('tone-amplitude').value=t.amplitude;}catch(e){}}
-$('tone-enabled').addEventListener('change',()=>toneDirty=true);$('tone-frequency').addEventListener('input',()=>toneDirty=true);$('tone-amplitude').addEventListener('input',()=>toneDirty=true);
-async function resetAll(){await fetch('/api/reset_clips?all=1',{method:'POST'});}
-function dbPct(v){return Math.max(0,Math.min(100,(v+60)*100/60));}
-function drawChannelGraph(canvas,history,color){const width=canvas.clientWidth||90,height=canvas.clientHeight||42,ratio=window.devicePixelRatio||1;canvas.width=width*ratio;canvas.height=height*ratio;const ctx=canvas.getContext('2d');ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,width,height);ctx.strokeStyle='#2e3440';ctx.lineWidth=1;[-12,-36].forEach(db=>{const y=height-(dbPct(db)/100*height);ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(width,y);ctx.stroke();});ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();history.forEach((db,x)=>{const px=x/(HISTORY_LEN-1)*width,py=height-(dbPct(db)/100*height);if(x===0)ctx.moveTo(px,py);else ctx.lineTo(px,py);});ctx.stroke();}
-function renderMeters(id,data,color){const type=id==='capture'?'capture':'playback';$(id).innerHTML=data.map((m,i)=>`<div class="meter"><b>CH${i+1}</b><div class="bar"><div class="fill" style="width:${dbPct(m.rms_db)}%;background:${color}"></div></div><canvas class="ch-graph" id="${type}-graph-${i}" aria-label="${type} channel ${i+1} history"></canvas><small>${m.rms_db.toFixed(1)} dB</small><small>${m.clipped?'CLIP':'P:'+m.peak_hold_db.toFixed(1)}</small><small class="raw-value">raw: ${Number(m.raw_value||0).toFixed(6)}<br>peak: ${Number(m.raw_peak||0).toFixed(6)}</small></div>`).join('');data.forEach((m,i)=>{const history=meterHistory[type][i];history.push(m.rms_db);if(history.length>HISTORY_LEN)history.shift();drawChannelGraph($(`${type}-graph-${i}`),history,color);});setRawVisibility(rawVisible);}
-async function meters(){try{const d=await(await fetch('/api/meters',{cache:'no-store'})).json();renderMeters('capture',d.capture,'#88c0d0');renderMeters('playback',d.playback,'#a3be8c');}catch(e){}}
-async function refreshAll(){if(refreshBusy)return;refreshBusy=true;try{await Promise.all([loadGraph(),meters(),fetch('/api/clients',{cache:'no-store'}).then(r=>r.json()).then(renderClients)]);}catch(e){$('status').textContent='Connection error; retrying...';}finally{refreshBusy=false;}}
-setRawVisibility(false);loadTone();refreshAll();setInterval(refreshAll,1000);setInterval(meters,100);
+const $ = id => document.getElementById(id);
+let graph = { endpoints: [], routes: [] };
+let graphSignature = '';
+let refreshBusy = false;
+let mutationBusy = false;
+let toneDirty = false;
+let rawVisible = false;
+const routeDrafts = new Map();
+const HISTORY_LEN = 60;
+const meterHistory = {
+    capture: Array.from({ length: 8 }, () => []),
+    playback: Array.from({ length: 8 }, () => [])
+};
+const clientHistory = new Map();
+
+function esc(value) {
+    return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+}
+function endpointLabel(endpoint, channel) { return `${endpoint.id} / CH${channel + 1}`; }
+function endpointMap() { return Object.fromEntries(graph.endpoints.map(endpoint => [endpoint.id, endpoint])); }
+function selectedValue(id) { return $(id).value; }
+function setOptions(id, items, oldValue) {
+    const select = $(id);
+    const values = items.map(item => item.value);
+    select.innerHTML = items.map(item => `<option value="${esc(item.value)}">${esc(item.label)}</option>`).join('');
+    if (values.includes(oldValue)) select.value = oldValue;
+    else if (values.length) select.selectedIndex = 0;
+}
+
+function setRawVisibility(visible) {
+    rawVisible = Boolean(visible);
+    $('hardware-meters').classList.toggle('raw-visible', rawVisible);
+    $('client-meters').classList.toggle('raw-visible', rawVisible);
+    $('show-raw').checked = rawVisible;
+    const state = $('raw-state');
+    state.textContent = rawVisible ? 'ON — VISIBLE' : 'OFF — HIDDEN';
+    state.classList.toggle('on', rawVisible);
+    document.querySelectorAll('[data-raw-value]').forEach(element => {
+        element.classList.toggle('visible', rawVisible);
+        element.style.display = rawVisible ? 'block' : 'none';
+    });
+}
+
+function renderClients(data) {
+    $('clients').innerHTML = data.clients.length ? data.clients.map(client => `
+        <div class="client connected">
+            <h3>Client #${client.id}</h3>
+            <small>${esc(client.ip || 'unknown')}</small>
+            <div class="endpoint">INPUT: ${client.input_channels} ch</div>
+            <div class="endpoint">OUTPUT: ${client.output_channels} ch</div>
+        </div>`).join('') : '<span>None connected</span>';
+    renderClientMeters(data);
+}
+
+function renderClientMeters(data) {
+    $('client-meters').innerHTML = data.clients.length ? data.clients.map(client => `
+        <div class="client">
+            <h3>Client #${client.id}</h3>
+            <div class="client-meter-groups">
+                <div class="client-meter-group">
+                    <h4>CLIENT INPUT → SERVER</h4>
+                    <div class="meters">${(client.input_meters || []).map((meter, index) => clientMeterCard(client.id, 'input', meter, index, '#88c0d0')).join('')}</div>
+                </div>
+                <div class="client-meter-group">
+                    <h4>SERVER → CLIENT OUTPUT</h4>
+                    <div class="meters">${(client.output_meters || []).map((meter, index) => clientMeterCard(client.id, 'output', meter, index, '#a3be8c')).join('')}</div>
+                </div>
+            </div>
+        </div>`).join('') : '<span>None connected</span>';
+
+    data.clients.forEach(client => {
+        drawClientGraphs(client.id, 'input', client.input_meters || []);
+        drawClientGraphs(client.id, 'output', client.output_meters || []);
+    });
+    setRawVisibility(rawVisible);
+}
+
+function clientMeterCard(clientId, direction, meter, index, color) {
+    return `<div class="meter">
+        <span class="raw-badge">RAW</span>
+        <b>CH${index + 1}</b>
+        <div class="bar"><div class="fill" style="width:${dbPercent(meter.rms_db)}%;background:${color}"></div></div>
+        <canvas class="ch-graph" id="client-${clientId}-${direction}-graph-${index}" aria-label="client ${clientId} ${direction} channel ${index + 1} history"></canvas>
+        <small>${Number(meter.rms_db || -60).toFixed(1)} dB</small>
+        <small>${meter.clipped ? 'CLIP' : 'P:' + Number(meter.peak_hold_db || -60).toFixed(1)}</small>
+        <small class="raw-values" data-raw-value>raw: ${Number(meter.raw_value || 0).toFixed(6)}<br>peak: ${Number(meter.raw_peak || 0).toFixed(6)}</small>
+    </div>`;
+}
+
+function renderSelectors() {
+    const oldSource = selectedValue('source');
+    const oldDestination = selectedValue('destination');
+    const sources = graph.endpoints.filter(endpoint => endpoint.direction === 'source').flatMap(endpoint =>
+        Array.from({ length: endpoint.channels }, (_, channel) => ({ value: `${endpoint.id}|${channel}`, label: endpointLabel(endpoint, channel) })));
+    const destinations = graph.endpoints.filter(endpoint => endpoint.direction === 'destination').flatMap(endpoint =>
+        Array.from({ length: endpoint.channels }, (_, channel) => ({ value: `${endpoint.id}|${channel}`, label: endpointLabel(endpoint, channel) })));
+    setOptions('source', sources, oldSource);
+    setOptions('destination', destinations, oldDestination);
+}
+
+function renderRoutes() {
+    const endpoints = endpointMap();
+    const activeIds = new Set(graph.routes.map(route => String(route.id)));
+    for (const id of routeDrafts.keys()) if (!activeIds.has(id)) routeDrafts.delete(id);
+    $('routes').innerHTML = graph.routes.length ? graph.routes.map(route => {
+        const source = endpoints[route.source];
+        const destination = endpoints[route.destination];
+        const sourceLabel = source ? endpointLabel(source, route.source_channel) : `${route.source} / CH${route.source_channel + 1}`;
+        const destinationLabel = destination ? endpointLabel(destination, route.destination_channel) : `${route.destination} / CH${route.destination_channel + 1}`;
+        const draft = routeDrafts.get(String(route.id));
+        const gain = draft === undefined ? Number(route.gain).toFixed(2) : esc(draft);
+        return `<div class="route">
+            <span class="edge ${route.enabled ? '' : 'muted'}">#${route.id}: ${esc(sourceLabel)} → ${esc(destinationLabel)}</span>
+            <label>Gain <input id="gain-${route.id}" data-route-gain="${route.id}" type="number" min="0" max="8" step="0.01" value="${gain}"></label>
+            <button data-action="toggle" data-id="${route.id}" data-enabled="${!route.enabled}">${route.enabled ? 'MUTE' : 'ENABLE'}</button>
+            <button data-action="save" data-id="${route.id}" data-enabled="${route.enabled}">SAVE GAIN</button>
+            <button data-action="delete" data-id="${route.id}">UNROUTE</button>
+        </div>`;
+    }).join('') : '<span>None</span>';
+}
+
+async function loadGraph() {
+    const response = await fetch('/api/graph', { cache: 'no-store' });
+    if (!response.ok) throw Error(response.status);
+    const next = await response.json();
+    const signature = JSON.stringify(next);
+    if (signature !== graphSignature) {
+        graph = next;
+        graphSignature = signature;
+        renderSelectors();
+        renderRoutes();
+    }
+    $('status').textContent = `${graph.endpoints.length} endpoints, ${graph.routes.length} routes`;
+}
+
+async function addRoute() {
+    if (mutationBusy || !$('source').value || !$('destination').value) return;
+    const [source, sourceChannel] = $('source').value.split('|');
+    const [destination, destinationChannel] = $('destination').value.split('|');
+    mutationBusy = true;
+    $('connect').disabled = true;
+    try {
+        const response = await fetch(`/api/routes?source=${encodeURIComponent(source)}&source_ch=${sourceChannel}&destination=${encodeURIComponent(destination)}&destination_ch=${destinationChannel}&gain=${encodeURIComponent($('route-gain').value)}`, { method: 'POST' });
+        if (!response.ok) alert(await response.text());
+        else { graphSignature = ''; await loadGraph(); }
+    } finally { mutationBusy = false; $('connect').disabled = false; }
+}
+
+async function routeAction(id, action, enabled) {
+    if (mutationBusy) return;
+    mutationBusy = true;
+    try {
+        const response = action === 'delete'
+            ? await fetch(`/api/routes/${id}`, { method: 'DELETE' })
+            : await fetch(`/api/routes/update?id=${id}&enabled=${enabled ? 1 : 0}&gain=${encodeURIComponent($(`gain-${id}`).value)}`, { method: 'POST' });
+        if (!response.ok) alert(await response.text());
+        else { routeDrafts.delete(String(id)); graphSignature = ''; await loadGraph(); }
+    } finally { mutationBusy = false; }
+}
+
+$('routes').addEventListener('input', event => {
+    const input = event.target.closest('input[data-route-gain]');
+    if (input) routeDrafts.set(input.dataset.routeGain, input.value);
+});
+$('routes').addEventListener('click', event => {
+    const button = event.target.closest('button[data-action]');
+    if (button) routeAction(Number(button.dataset.id), button.dataset.action, button.dataset.enabled === 'true');
+});
+$('show-raw').addEventListener('change', event => setRawVisibility(event.target.checked));
+$('tone-enabled').addEventListener('change', () => toneDirty = true);
+$('tone-frequency').addEventListener('input', () => toneDirty = true);
+$('tone-amplitude').addEventListener('input', () => toneDirty = true);
+
+async function applyTone() {
+    const button = $('tone-apply');
+    button.disabled = true;
+    try {
+        const response = await fetch(`/api/tone?enabled=${$('tone-enabled').value}&frequency=${encodeURIComponent($('tone-frequency').value)}&amplitude=${encodeURIComponent($('tone-amplitude').value)}`, { method: 'POST' });
+        if (!response.ok) alert(await response.text());
+        else toneDirty = false;
+    } finally { button.disabled = false; }
+}
+async function loadTone() {
+    if (toneDirty) return;
+    try {
+        const tone = await (await fetch('/api/tone', { cache: 'no-store' })).json();
+        if (toneDirty) return;
+        $('tone-enabled').value = tone.enabled ? '1' : '0';
+        $('tone-frequency').value = tone.frequency_hz;
+        $('tone-amplitude').value = tone.amplitude;
+    } catch (error) {}
+}
+async function resetAll() { await fetch('/api/reset_clips?all=1', { method: 'POST' }); }
+function dbPercent(db) { return Math.max(0, Math.min(100, (Number(db) + 60) * 100 / 60)); }
+function drawHistory(canvas, history, color) {
+    const width = canvas.clientWidth || 72;
+    const height = canvas.clientHeight || 42;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = width * ratio;
+    canvas.height = height * ratio;
+    const context = canvas.getContext('2d');
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.strokeStyle = '#2e3440';
+    context.lineWidth = 1;
+    [-12, -36].forEach(db => {
+        const y = height - dbPercent(db) / 100 * height;
+        context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
+    });
+    context.strokeStyle = color;
+    context.lineWidth = 1.25;
+    context.beginPath();
+    history.forEach((db, index) => {
+        const x = index / Math.max(1, HISTORY_LEN - 1) * width;
+        const y = height - dbPercent(db) / 100 * height;
+        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+    });
+    context.stroke();
+}
+function renderMeters(id, data, color, type) {
+    $(id).innerHTML = data.map((meter, index) => `<div class="meter">
+        <span class="raw-badge">RAW</span><b>CH${index + 1}</b>
+        <div class="bar"><div class="fill" style="width:${dbPercent(meter.rms_db)}%;background:${color}"></div></div>
+        <canvas class="ch-graph" id="${type}-graph-${index}" aria-label="${type} channel ${index + 1} history"></canvas>
+        <small>${Number(meter.rms_db || -60).toFixed(1)} dB</small>
+        <small>${meter.clipped ? 'CLIP' : 'P:' + Number(meter.peak_hold_db || -60).toFixed(1)}</small>
+        <small class="raw-values" data-raw-value>raw: ${Number(meter.raw_value || 0).toFixed(6)}<br>peak: ${Number(meter.raw_peak || 0).toFixed(6)}</small>
+    </div>`).join('');
+    data.forEach((meter, index) => {
+        const history = meterHistory[type][index];
+        history.push(Number(meter.rms_db) || -60);
+        if (history.length > HISTORY_LEN) history.shift();
+        drawHistory($(`${type}-graph-${index}`), history, color);
+    });
+    setRawVisibility(rawVisible);
+}
+async function meters() {
+    try {
+        const data = await (await fetch('/api/meters', { cache: 'no-store' })).json();
+        renderMeters('capture', data.capture, '#88c0d0', 'capture');
+        renderMeters('playback', data.playback, '#a3be8c', 'playback');
+    } catch (error) {}
+}
+function drawClientGraphs(clientId, direction, data) {
+    data.forEach((meter, index) => {
+        const key = `${clientId}-${direction}-${index}`;
+        const history = clientHistory.get(key) || [];
+        history.push(Number(meter.rms_db) || -60);
+        if (history.length > HISTORY_LEN) history.shift();
+        clientHistory.set(key, history);
+        drawHistory($(`client-${clientId}-${direction}-graph-${index}`), history, direction === 'input' ? '#88c0d0' : '#a3be8c');
+    });
+}
+async function refreshAll() {
+    if (refreshBusy) return;
+    refreshBusy = true;
+    try {
+        await Promise.all([
+            loadGraph(),
+            meters(),
+            fetch('/api/clients', { cache: 'no-store' }).then(response => response.json()).then(renderClients),
+            loadTone()
+        ]);
+    } catch (error) {
+        $('status').textContent = 'Connection error; retrying...';
+    } finally { refreshBusy = false; }
+}
+
+setRawVisibility(false);
+refreshAll();
+setInterval(refreshAll, 1000);
+setInterval(meters, 100);
 </script>
 </body>
 </html>

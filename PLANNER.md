@@ -4,11 +4,17 @@
 **Scope:** Replace the current fixed point-to-point audio behavior with a channel-level, network-capable audio patchbay and matrix mixer.  
 **Last reviewed:** 2026-08-30
 
+## Current status
+
+The MVP dashboard now includes hardware and client channel meters, per-channel history graphs, optional raw numeric values with explicit visible/hidden state, tone injection controls, and route management. The raw-value visibility bug has been fixed and user-confirmed.
+
 ## Implementation status
 
 The first prototype implementation is now in the repository. It provides a server-side route list, local hardware channel routing, client endpoint discovery, client-to-client/server-to-client routing through the CM5 routing process, per-route gain/mute/delete controls, and a dashboard that preserves user edits during refresh.
 
 This is **not all caught up**. The prototype still needs the production graph model, framed channel-aware media protocol, proper real-time thread/queue architecture, complete patchbay interaction design, persistence, authentication, diagnostics, and remote CM5-instance support described below. The statuses in the phase list and register distinguish implemented prototype work from remaining production work.
+
+The following MVP dashboard items are complete: client meters are displayed below hardware meters, client per-channel history graphs are restored, hardware/client raw-value visibility is explicit and user-confirmed, and tone injection controls are available.
 
 ## 1. Purpose and product goal
 
@@ -945,6 +951,9 @@ Use these tags consistently in this file and in future planning notes:
 - PLANNED: Add remote CM5-instance nodes and instance-to-instance media streams.
 
 ### COMPLETED IN PROTOTYPE
+
+- COMPLETED: User-confirmed fix for hardware raw-value checkbox visibility logic; unchecked hides raw values and checked shows them.
+- COMPLETED: User-confirmed compact client meter formatting and client per-channel history graphs.
 
 - COMPLETED: Added a server-side route model with fan-in, fan-out, per-route gain, mute, and individual unroute operations.
 - COMPLETED: Added local hardware capture/playback endpoints and client source/destination endpoints to the prototype graph.

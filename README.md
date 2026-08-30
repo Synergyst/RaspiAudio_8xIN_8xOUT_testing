@@ -18,7 +18,9 @@ When started from the repository root with the supplied TLS certificate:
 - Dashboard: `https://192.168.168.172:8182/`
 - Browser audio client: `https://192.168.168.172:8182/client/index.html`
 - Audio WebSocket: `wss://192.168.168.172:8183/ws/audio`
-- Meter API: `GET /api/meters`
+- Meter API: `GET /api/meters` (includes RMS/peak data and raw numeric fields)
+- Raw port API: `GET /api/raw`
+- Tone API: `GET /api/tone` and `POST /api/tone?enabled=0|1&frequency=440&amplitude=0.2`
 - Control API: `POST /api/control?type=capture|playback&ch=0..7&gain=1.0&mute=0|1`
 - Clip reset API: `POST /api/reset_clips?type=capture|playback&ch=0..7` or `POST /api/reset_clips?all=1`
 
@@ -181,6 +183,9 @@ Build outputs, WASM distribution files, native private keys, and generated certi
 - The current real-time audio callback still performs dynamic allocations and uses mutex-protected client ring buffers; this should be improved before demanding low-latency production use.
 - The native server's web asset paths are relative to the process working directory.
 - Browser microphone permissions and certificate trust are controlled by the browser/device, not by the WASM module.
+- The dashboard displays hardware meters first and per-client channel meters below them, including per-channel history graphs.
+- The raw-value checkbox explicitly shows `OFF — HIDDEN` or `ON — VISIBLE`; when enabled, hardware and client cards show current raw sample and block peak values.
+- The MVP is intended for a trusted LAN with zero application authentication and zero manual enrollment; clients connect and appear automatically.
 
 ## Planning and status tracking
 
