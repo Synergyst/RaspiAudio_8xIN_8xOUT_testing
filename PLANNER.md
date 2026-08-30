@@ -6,15 +6,15 @@
 
 ## Current status
 
-The MVP dashboard now includes hardware and client channel meters, per-channel history graphs, optional raw numeric values with explicit visible/hidden state, tone injection controls, and route management. The raw-value visibility bug has been fixed and user-confirmed.
+The MVP dashboard now includes hardware and client channel meters, per-channel history graphs, optional raw numeric values with explicit visible/hidden state, tone injection controls, route management, and one SAVE SETTINGS workflow. Settings and route restoration are implemented and user-confirmed.
 
 ## Implementation status
 
 The first prototype implementation is now in the repository. It provides a server-side route list, local hardware channel routing, client endpoint discovery, client-to-client/server-to-client routing through the CM5 routing process, per-route gain/mute/delete controls, and a dashboard that preserves user edits during refresh.
 
-This is **not all caught up**. The prototype still needs the production graph model, framed channel-aware media protocol, proper real-time thread/queue architecture, complete patchbay interaction design, persistence, authentication, diagnostics, and remote CM5-instance support described below. The statuses in the phase list and register distinguish implemented prototype work from remaining production work.
+This is **not all caught up**. The prototype still needs the production graph model, framed channel-aware media protocol, proper real-time thread/queue architecture, complete patchbay interaction design, diagnostics, and remote CM5-instance support described below. The MVP intentionally uses zero authentication on the trusted LAN. The statuses in the phase list and register distinguish implemented prototype work from remaining production work.
 
-The following MVP dashboard items are complete: client meters are displayed below hardware meters, client per-channel history graphs are restored, hardware/client raw-value visibility is explicit and user-confirmed, and tone injection controls are available.
+The following MVP dashboard items are complete: client meters are displayed below hardware meters, client per-channel history graphs are restored, hardware/client raw-value visibility is explicit and user-confirmed, tone injection controls are available, and settings/routes use one SAVE SETTINGS workflow with automatic startup/reconnection restoration.
 
 ## 1. Purpose and product goal
 
@@ -937,8 +937,8 @@ Use these tags consistently in this file and in future planning notes:
 - TODO: Define the exact binary media header and endianness.
 - TODO: Define an initial maximum route/node/endpoint limit for the CM5 target.
 - TODO: Select or implement the initial lock-free queue primitive.
-- TODO: Define browser client naming and reconnect identity.
-- TODO: Add a route-scene JSON schema version.
+- TODO: Extend browser client naming and reconnect identity handling beyond the current localStorage/hello prototype.
+- TODO: Extend the existing JSON settings schema for future scene/version migrations.
 - TODO: Add route and graph test coverage, including client-to-client paths that bypass local DAC output.
 - TODO: Replace the prototype callback allocations and mutex-protected queues with a production-safe audio block pipeline.
 
@@ -947,7 +947,7 @@ Use these tags consistently in this file and in future planning notes:
 - PLANNED: Complete the arbitrary local matrix implementation with immutable graph snapshots and audio-block-boundary updates.
 - PLANNED: Complete the framed, channel-aware media protocol and jitter/clock handling.
 - PLANNED: Complete the visual channel-level patchbay with draggable per-channel sockets and route lines.
-- PLANNED: Add graph revisioning, live graph events, persistence, and scene loading.
+- PLANNED: Add graph revisioning, live graph events, and scene loading beyond the current settings file.
 - PLANNED: Add remote CM5-instance nodes and instance-to-instance media streams.
 
 ### COMPLETED IN PROTOTYPE
@@ -961,6 +961,9 @@ Use these tags consistently in this file and in future planning notes:
 - COMPLETED: Added `/api/clients`, `/api/graph`, and prototype route mutation endpoints.
 - COMPLETED: Added connected-client cards and route controls to the dashboard.
 - COMPLETED: Prevented automatic dashboard refreshes from overwriting active selections and route-gain edits.
+- COMPLETED: Added one SAVE SETTINGS workflow for hardware controls, tone settings, client names, and routes.
+- COMPLETED: Added startup settings loading and automatic restoration of saved routes when matching client identities reconnect.
+- COMPLETED: Added browser client identity persistence, human-readable names, and simultaneous-identity conflict handling.
 
 ### DEPRECATING
 
