@@ -1,13 +1,14 @@
 #include "miniaudio.h"
 #include "web_server.h"
-#include <iostream>
-#include <cstring>
-#include <csignal>
+#include <algorithm>
+#include <array>
 #include <atomic>
-#include <thread>
 #include <chrono>
 #include <cmath>
-#include <algorithm>
+#include <csignal>
+#include <cstring>
+#include <iostream>
+#include <thread>
 
 std::atomic<bool> g_running(true);
 AudioMetrics g_metrics;
@@ -15,142 +16,160 @@ AudioControls g_controls;
 ClientManager g_clientMgr;
 
 void signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
-        g_running = false;
-    }
+    if (signal == SIGINT || signal == SIGTERM) g_running = false;
 }
 
-inline float lin_to_db(float lin) {
+static float lin_to_db(float lin) {
     if (lin <= 0.00001f) return -60.0f;
-    float db = 20.0f * std::log10(lin);
-    return db < -60.0f ? -60.0f : (db > 0.0f ? 0.0f : db);
+    return std::clamp(20.0f * std::log10(lin), -60.0f, 0.0f);
 }
 
-void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    if (pInput == NULL || pOutput == NULL || frameCount == 0) return;
+static std::shared_ptr<WebClientSession> find_client(
+    const std::vector<std::shared_ptr<WebClientSession>>& sessions, uint32_t id) {
+    for (const auto& session : sessions) if (session->id == id) return session;
+    return {};
+}
 
-    const float* in = static_cast<const float*>(pInput);
-    float* out = static_cast<float*>(pOutput);
+static bool parse_client_endpoint(const std::string& endpoint, bool source, uint32_t& id) {
+    const std::string prefix = "client/";
+    const std::string suffix = source ? "/capture" : "/playback";
+    if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 ||
+        endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+    try {
+        id = static_cast<uint32_t>(std::stoul(endpoint.substr(prefix.size(), endpoint.size() - prefix.size() - suffix.size())));
+        return id != 0;
+    } catch (...) { return false; }
+}
 
-    float cap_gains[8];
-    float pb_gains[8];
+void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    if (!pOutput || !pInput || frameCount == 0) return;
+    auto* in = static_cast<const float*>(pInput);
+    auto* out = static_cast<float*>(pOutput);
+    const unsigned frames = std::min<unsigned>(frameCount, CM5_MAX_AUDIO_FRAMES);
+    thread_local std::array<float, CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS> local_capture{};
+    auto sessions = g_clientMgr.get_active_sessions();
 
-    for (int c = 0; c < 8; ++c) {
-        bool cap_mute = g_controls.capture[c].mute.load(std::memory_order_relaxed);
-        cap_gains[c] = cap_mute ? 0.0f : g_controls.capture[c].gain.load(std::memory_order_relaxed);
+    std::fill(local_capture.begin(), local_capture.begin() + frames * CM5_MAX_CHANNELS, 0.0f);
+    std::memset(out, 0, frameCount * CM5_MAX_CHANNELS * sizeof(float));
 
-        bool pb_mute = g_controls.playback[c].mute.load(std::memory_order_relaxed);
-        pb_gains[c] = pb_mute ? 0.0f : g_controls.playback[c].gain.load(std::memory_order_relaxed);
+    float capture_gain[CM5_MAX_CHANNELS];
+    float playback_gain[CM5_MAX_CHANNELS];
+    float cap_sum[CM5_MAX_CHANNELS] = {};
+    float cap_peak[CM5_MAX_CHANNELS] = {};
+    float pb_sum[CM5_MAX_CHANNELS] = {};
+    float pb_peak[CM5_MAX_CHANNELS] = {};
+
+    for (unsigned c = 0; c < CM5_MAX_CHANNELS; ++c) {
+        capture_gain[c] = g_controls.capture[c].mute.load(std::memory_order_relaxed) ? 0.0f :
+            g_controls.capture[c].gain.load(std::memory_order_relaxed);
+        playback_gain[c] = g_controls.playback[c].mute.load(std::memory_order_relaxed) ? 0.0f :
+            g_controls.playback[c].gain.load(std::memory_order_relaxed);
     }
 
-    // 1. Process Hardware Inputs & DSP
-    float in_sum_sq[8] = {0};
-    float in_peak[8]   = {0};
-    float out_sum_sq[8] = {0};
-    float out_peak[8]  = {0};
-
-    std::vector<float> client_monitor_buf(frameCount * 2, 0.0f);
-
-    for (ma_uint32 i = 0; i < frameCount; ++i) {
-        for (int c = 0; c < 8; ++c) {
-            float raw_in = in[i * 8 + c];
-            float proc_in = raw_in * cap_gains[c];
-
-            float abs_in = std::abs(proc_in);
-            if (abs_in >= 0.999f) g_metrics.capture[c].clipped.store(true, std::memory_order_relaxed);
-
-            in_sum_sq[c] += proc_in * proc_in;
-            if (abs_in > in_peak[c]) in_peak[c] = abs_in;
-
-            float final_out = proc_in * pb_gains[c];
-            out[i * 8 + c] = final_out;
-
-            float abs_out = std::abs(final_out);
-            if (abs_out >= 0.999f) g_metrics.playback[c].clipped.store(true, std::memory_order_relaxed);
-
-            out_sum_sq[c] += final_out * final_out;
-            if (abs_out > out_peak[c]) out_peak[c] = abs_out;
-        }
-
-        // Tap Channels 1 & 2 for Web Client Monitoring (Stereo L/R)
-        client_monitor_buf[i * 2 + 0] = out[i * 8 + 0];
-        client_monitor_buf[i * 2 + 1] = out[i * 8 + 1];
-    }
-
-    // 2. Mix Active Web Client Microphone Streams into Hardware Playback CH1
-    auto activeSessions = g_clientMgr.get_active_sessions();
-    for (auto& session : activeSessions) {
-        if (!session->active) continue;
-
-        // Push stereo monitor audio to client speakers
-        session->outgoing_rb.write(client_monitor_buf.data(), frameCount * 2 * sizeof(float));
-
-        // Pull client mic audio and mix into hardware output CH1
-        std::vector<float> micBuf(frameCount, 0.0f);
-        size_t reqBytes = frameCount * sizeof(float);
-        size_t readBytes = session->incoming_rb.read(micBuf.data(), reqBytes);
-        size_t readFrames = readBytes / sizeof(float);
-
-        for (size_t i = 0; i < readFrames; ++i) {
-            out[i * 8 + 0] += micBuf[i];
+    for (unsigned i = 0; i < frames; ++i) {
+        for (unsigned c = 0; c < CM5_MAX_CHANNELS; ++c) {
+            const float value = in[i * CM5_MAX_CHANNELS + c] * capture_gain[c];
+            local_capture[i * CM5_MAX_CHANNELS + c] = value;
+            const float magnitude = std::abs(value);
+            cap_sum[c] += value * value;
+            cap_peak[c] = std::max(cap_peak[c], magnitude);
+            if (magnitude >= 0.999f) g_metrics.capture[c].clipped.store(true, std::memory_order_relaxed);
         }
     }
 
-    // 3. Update Peak Meters & Hold Values
-    for (int c = 0; c < 8; ++c) {
-        float in_rms = std::sqrt(in_sum_sq[c] / frameCount);
-        float in_peak_db = lin_to_db(in_peak[c]);
-        g_metrics.capture[c].rms_db.store(lin_to_db(in_rms), std::memory_order_relaxed);
-        g_metrics.capture[c].peak_db.store(in_peak_db, std::memory_order_relaxed);
+    // Pull each client's source stream once per block. Client input channels are negotiated.
+    for (const auto& session : sessions) {
+        const unsigned channels = std::clamp(session->input_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
+        std::fill(session->input_block.begin(), session->input_block.begin() + frames * CM5_MAX_CHANNELS, 0.0f);
+        const size_t bytes = frames * channels * sizeof(float);
+        const size_t got = session->incoming_rb.read(session->packet_block.data(), bytes);
+        const size_t samples = got / sizeof(float);
+        std::copy(session->packet_block.begin(), session->packet_block.begin() + samples, session->input_block.begin());
+    }
+    for (const auto& session : sessions)
+        std::fill(session->output_block.begin(), session->output_block.begin() + frames * CM5_MAX_CHANNELS, 0.0f);
 
-        float cap_cur_hold = g_metrics.capture[c].peak_hold_db.load(std::memory_order_relaxed);
-        if (in_peak_db > cap_cur_hold) {
-            g_metrics.capture[c].peak_hold_db.store(in_peak_db, std::memory_order_relaxed);
-        } else {
-            g_metrics.capture[c].peak_hold_db.store(std::max(-60.0f, cap_cur_hold - 0.15f), std::memory_order_relaxed);
+    const auto routes = g_clientMgr.route_snapshot();
+    for (const auto& route : *routes) {
+        if (!route.enabled || route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS) continue;
+        uint32_t source_id = 0, destination_id = 0;
+        const bool source_hw = route.source_endpoint == "hardware/capture";
+        const bool destination_hw = route.destination_endpoint == "hardware/playback";
+        if (!source_hw && !parse_client_endpoint(route.source_endpoint, true, source_id)) continue;
+        if (!destination_hw && !parse_client_endpoint(route.destination_endpoint, false, destination_id)) continue;
+        auto source_session = source_hw ? std::shared_ptr<WebClientSession>() : find_client(sessions, source_id);
+        auto destination_session = destination_hw ? std::shared_ptr<WebClientSession>() : find_client(sessions, destination_id);
+        if ((!source_hw && !source_session) || (!destination_hw && !destination_session)) continue;
+        const unsigned source_channels = source_hw ? CM5_MAX_CHANNELS :
+            std::clamp(source_session->input_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
+        const unsigned destination_channels = destination_hw ? CM5_MAX_CHANNELS :
+            std::clamp(destination_session->output_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
+        if (route.source_channel >= source_channels || route.destination_channel >= destination_channels) continue;
+        for (unsigned i = 0; i < frames; ++i) {
+            const float value = source_hw ? local_capture[i * CM5_MAX_CHANNELS + route.source_channel] :
+                source_session->input_block[i * CM5_MAX_CHANNELS + route.source_channel];
+            if (destination_hw) out[i * CM5_MAX_CHANNELS + route.destination_channel] += value * route.gain;
+            else destination_session->output_block[i * CM5_MAX_CHANNELS + route.destination_channel] += value * route.gain;
         }
+    }
 
-        float out_rms = std::sqrt(out_sum_sq[c] / frameCount);
-        float out_peak_db = lin_to_db(out_peak[c]);
+    for (unsigned i = 0; i < frames; ++i) {
+        for (unsigned c = 0; c < CM5_MAX_CHANNELS; ++c) {
+            out[i * CM5_MAX_CHANNELS + c] *= playback_gain[c];
+            const float magnitude = std::abs(out[i * CM5_MAX_CHANNELS + c]);
+            pb_sum[c] += out[i * CM5_MAX_CHANNELS + c] * out[i * CM5_MAX_CHANNELS + c];
+            pb_peak[c] = std::max(pb_peak[c], magnitude);
+            if (magnitude >= 0.999f) g_metrics.playback[c].clipped.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    for (const auto& session : sessions) {
+        const unsigned channels = std::clamp(session->output_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
+        for (unsigned i = 0; i < frames; ++i)
+            for (unsigned c = 0; c < channels; ++c)
+                session->packet_block[i * channels + c] = session->output_block[i * CM5_MAX_CHANNELS + c];
+        session->outgoing_rb.write(session->packet_block.data(), frames * channels * sizeof(float));
+    }
+
+    for (unsigned c = 0; c < CM5_MAX_CHANNELS; ++c) {
+        const float rms = std::sqrt(cap_sum[c] / frames);
+        const float peak_db = lin_to_db(cap_peak[c]);
+        g_metrics.capture[c].rms_db.store(lin_to_db(rms), std::memory_order_relaxed);
+        g_metrics.capture[c].peak_db.store(peak_db, std::memory_order_relaxed);
+        const float old_cap = g_metrics.capture[c].peak_hold_db.load(std::memory_order_relaxed);
+        g_metrics.capture[c].peak_hold_db.store(std::max(peak_db, std::max(-60.0f, old_cap - 0.15f)), std::memory_order_relaxed);
+
+        const float out_rms = std::sqrt(pb_sum[c] / frames);
+        const float out_peak_db = lin_to_db(pb_peak[c]);
         g_metrics.playback[c].rms_db.store(lin_to_db(out_rms), std::memory_order_relaxed);
         g_metrics.playback[c].peak_db.store(out_peak_db, std::memory_order_relaxed);
-
-        float pb_cur_hold = g_metrics.playback[c].peak_hold_db.load(std::memory_order_relaxed);
-        if (out_peak_db > pb_cur_hold) {
-            g_metrics.playback[c].peak_hold_db.store(out_peak_db, std::memory_order_relaxed);
-        } else {
-            g_metrics.playback[c].peak_hold_db.store(std::max(-60.0f, pb_cur_hold - 0.15f), std::memory_order_relaxed);
-        }
+        const float old_pb = g_metrics.playback[c].peak_hold_db.load(std::memory_order_relaxed);
+        g_metrics.playback[c].peak_hold_db.store(std::max(out_peak_db, std::max(-60.0f, old_pb - 0.15f)), std::memory_order_relaxed);
     }
 }
 
 int main() {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-
-    std::cout << "Starting CM5 Audio Engine with WASM Audio Bridge..." << std::endl;
+    std::cout << "Starting CM5 Audio Network Patchbay..." << std::endl;
 
     WebServer webServer(g_metrics, g_controls, g_clientMgr, 8182);
-    if (!webServer.start()) {
-        std::cerr << "Failed to start HTTP/WS server!" << std::endl;
-        return -1;
-    }
+    if (!webServer.start()) return -1;
 
-    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_duplex);
-    deviceConfig.capture.format   = ma_format_f32;
-    deviceConfig.capture.channels = 8;
-    deviceConfig.playback.format  = ma_format_f32;
-    deviceConfig.playback.channels= 8;
-    deviceConfig.sampleRate      = 48000;
-    deviceConfig.dataCallback    = data_callback;
+    ma_device_config config = ma_device_config_init(ma_device_type_duplex);
+    config.capture.format = ma_format_f32;
+    config.capture.channels = CM5_MAX_CHANNELS;
+    config.playback.format = ma_format_f32;
+    config.playback.channels = CM5_MAX_CHANNELS;
+    config.sampleRate = 48000;
+    config.dataCallback = data_callback;
 
     ma_device device;
-    if (ma_device_init(NULL, &deviceConfig, &device) != MA_SUCCESS) {
+    if (ma_device_init(NULL, &config, &device) != MA_SUCCESS) {
         std::cerr << "Failed to initialize audio device!" << std::endl;
         webServer.stop();
         return -1;
     }
-
     if (ma_device_start(&device) != MA_SUCCESS) {
         std::cerr << "Failed to start audio device!" << std::endl;
         ma_device_uninit(&device);
@@ -158,17 +177,9 @@ int main() {
         return -1;
     }
 
-    std::cout << "Operational." << std::endl;
-    std::cout << " - Dashboard:   https://192.168.168.172:8182/" << std::endl;
-    std::cout << " - WASM Client:  https://192.168.168.172:8182/client/index.html" << std::endl;
-
-    while (g_running) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    std::cout << "\nShutting down..." << std::endl;
+    std::cout << "Operational: https://192.168.168.172:8182/" << std::endl;
+    while (g_running) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     ma_device_uninit(&device);
     webServer.stop();
-
     return 0;
 }

@@ -181,3 +181,7 @@ Build outputs, WASM distribution files, native private keys, and generated certi
 - The current real-time audio callback still performs dynamic allocations and uses mutex-protected client ring buffers; this should be improved before demanding low-latency production use.
 - The native server's web asset paths are relative to the process working directory.
 - Browser microphone permissions and certificate trust are controlled by the browser/device, not by the WASM module.
+
+## Planning and status tracking
+
+See [`PLANNER.md`](PLANNER.md) for the detailed networked audio patchbay plan, architecture, implementation phases, and the `TODO` / `PLANNED` / `DEPRECATING` / `NEEDREVIEW` register.
