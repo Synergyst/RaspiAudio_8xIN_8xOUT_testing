@@ -133,7 +133,12 @@ void WebClientSession::start_sender(const std::shared_ptr<ix::WebSocket>& socket
 
 void WebClientSession::stop_sender() {
     active.store(false, std::memory_order_relaxed);
-    if (sender_thread.joinable()) sender_thread.join();
+    if (!sender_thread.joinable()) return;
+    if (sender_thread.get_id() == std::this_thread::get_id()) {
+        sender_thread.detach();
+        return;
+    }
+    sender_thread.join();
 }
 
 ClientManager::ClientManager()
@@ -379,9 +384,9 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
 }
 
 WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
-                     ClientManager& clientMgr, int httpPort, int wsPort)
+                     ClientManager& clientMgr, int httpPort, int wsPort, bool plainText)
     : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr),
-      m_httpPort(httpPort), m_wsPort(wsPort) {}
+      m_httpPort(httpPort), m_wsPort(wsPort), m_plainText(plainText) {}
 
 WebServer::~WebServer() { stop(); }
 
@@ -390,7 +395,7 @@ bool WebServer::start() {
     const std::string certPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_CERT"); return value && *value ? std::string(value) : "./certs/server.crt"; }();
     const std::string keyPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_KEY"); return value && *value ? std::string(value) : "./certs/server.key"; }();
     const std::string p12Path = [] { const char* value = std::getenv("CM5AUDIO_TLS_P12"); return value && *value ? std::string(value) : "./certs/server.p12"; }();
-    const bool tlsEnabled = std::ifstream(certPath).good() && std::ifstream(keyPath).good();
+    const bool tlsEnabled = !m_plainText && std::ifstream(certPath).good() && std::ifstream(keyPath).good();
 
     m_httpThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
         std::unique_ptr<httplib::Server> server;
@@ -399,7 +404,7 @@ bool WebServer::start() {
             if (!ssl->is_valid()) { std::cerr << "[HTTP] Invalid TLS certificate/key" << std::endl; m_running = false; return; }
             server = std::move(ssl);
         } else {
-            std::cerr << "[HTTP] TLS certificate/key not found; serving plain HTTP" << std::endl;
+            std::cerr << (m_plainText ? "[HTTP] Plain HTTP enabled" : "[HTTP] TLS certificate/key not found; serving plain HTTP") << std::endl;
             server = std::make_unique<httplib::Server>();
         }
         server->set_mount_point("/client", "./web_client");
@@ -651,6 +656,7 @@ bool WebServer::start() {
 
     m_wsThread = std::thread([this, certPath, keyPath, tlsEnabled] {
         ix::WebSocketServer server(m_wsPort, "0.0.0.0");
+        if (m_plainText) std::cerr << "[WS] Plain WS enabled" << std::endl;
         if (tlsEnabled) {
             ix::SocketTLSOptions tls;
             tls.certFile = certPath; tls.keyFile = keyPath; tls.caFile = "NONE"; tls.tls = true;

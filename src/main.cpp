@@ -203,13 +203,25 @@ void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 fram
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
-    std::cout << "Starting CM5 Audio Network Patchbay..." << std::endl;
+
+    bool plainText = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--plain-text") plainText = true;
+        else {
+            std::cerr << "Usage: " << argv[0] << " [--plain-text]" << std::endl;
+            return 2;
+        }
+    }
+
+    std::cout << "Starting CM5 Audio Network Patchbay"
+              << (plainText ? " in plain-text mode..." : "...") << std::endl;
     g_clientMgr.load_settings(g_controls, g_tone);
 
-    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, 8182);
+    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, 8182, 8183, plainText);
     if (!webServer.start()) return -1;
 
     ma_device_config config = ma_device_config_init(ma_device_type_duplex);
@@ -233,7 +245,7 @@ int main() {
         return -1;
     }
 
-    std::cout << "Operational: https://192.168.168.172:8182/" << std::endl;
+    std::cout << "Operational: http://192.168.168.172:8182/" << std::endl;
     while (g_running) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     ma_device_uninit(&device);
     webServer.stop();

@@ -156,7 +156,8 @@ private:
 class WebServer {
 public:
     WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
-              ClientManager& clientMgr, int httpPort = 8182, int wsPort = 8183);
+              ClientManager& clientMgr, int httpPort = 8182, int wsPort = 8183,
+              bool plainText = false);
     ~WebServer();
     bool start();
     void stop();
@@ -168,6 +169,7 @@ private:
     ClientManager& m_clientMgr;
     int m_httpPort;
     int m_wsPort;
+    bool m_plainText;
     std::atomic<bool> m_running{false};
     std::thread m_httpThread;
     std::thread m_wsThread;
