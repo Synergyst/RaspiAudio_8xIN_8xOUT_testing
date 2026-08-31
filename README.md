@@ -13,6 +13,7 @@ A Raspberry Pi CM5 audio engine for 8-channel duplex capture/playback with a bro
 - Persistent server settings and route restoration
 - Stable browser client identities with human-readable names
 - Single **SAVE SETTINGS** workflow for all settings and routes
+- Optional plain-text HTTP/WS mode for trusted-LAN development
 
 ## Runtime endpoints
 
@@ -20,7 +21,7 @@ When started from the repository root with the supplied TLS certificate:
 
 - Dashboard: `https://192.168.168.172:8182/`
 - Browser audio client: `https://192.168.168.172:8182/client/index.html`
-- Audio WebSocket: `wss://192.168.168.172:8183/ws/audio`
+- Audio WebSocket: `wss://192.168.168.172:8183/ws/audio` (or `ws://...` with `--plain-text`)
 - Meter API: `GET /api/meters` (includes RMS/peak data and raw numeric fields)
 - Raw port API: `GET /api/raw`
 - Tone API: `GET /api/tone` and `POST /api/tone?enabled=0|1&frequency=440&amplitude=0.2`
@@ -96,6 +97,14 @@ Run the engine from the repository root because the web assets and default TLS p
 ```bash
 ./cm5audio
 ```
+
+For trusted-LAN development without TLS:
+
+```bash
+./cm5audio --plain-text
+```
+
+This serves HTTP and WS, avoiding certificate trust setup. Chrome may require `chrome://flags/#unsafely-treat-insecure-origin-as-secure` with the exact origin `http://192.168.168.172:8182`, followed by a browser restart. Plain-text mode is not intended for untrusted networks.
 
 For custom certificate locations:
 

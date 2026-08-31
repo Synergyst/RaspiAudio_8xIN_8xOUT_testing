@@ -6,13 +6,13 @@
 
 ## Current status
 
-The MVP dashboard now includes hardware and client channel meters, per-channel history graphs, optional raw numeric values with explicit visible/hidden state, tone injection controls, route management, and one SAVE SETTINGS workflow. Settings and route restoration are implemented and user-confirmed.
+The MVP dashboard now includes hardware and client channel meters, per-channel history graphs, optional raw numeric values with explicit visible/hidden state, tone injection controls, route management, one SAVE SETTINGS workflow, and a working `--plain-text` HTTP/WS mode for trusted-LAN development. Settings and route restoration are implemented and user-confirmed.
 
 ## Implementation status
 
 The first prototype implementation is now in the repository. It provides a server-side route list, local hardware channel routing, client endpoint discovery, client-to-client/server-to-client routing through the CM5 routing process, per-route gain/mute/delete controls, and a dashboard that preserves user edits during refresh.
 
-This is **not all caught up**. The prototype still needs the production graph model, framed channel-aware media protocol, proper real-time thread/queue architecture, complete patchbay interaction design, diagnostics, and remote CM5-instance support described below. The MVP intentionally uses zero authentication on the trusted LAN. The statuses in the phase list and register distinguish implemented prototype work from remaining production work.
+This is **not all caught up**. The prototype still needs the production graph model, framed channel-aware media protocol, proper real-time thread/queue architecture, complete patchbay interaction design, diagnostics, and remote CM5-instance support described below. The MVP intentionally uses zero authentication on the trusted LAN and now supports `--plain-text` HTTP/WS operation to avoid certificate setup during trusted-LAN development. The statuses in the phase list and register distinguish implemented prototype work from remaining production work.
 
 The following MVP dashboard items are complete: client meters are displayed below hardware meters, client per-channel history graphs are restored, hardware/client raw-value visibility is explicit and user-confirmed, tone injection controls are available, and settings/routes use one SAVE SETTINGS workflow with automatic startup/reconnection restoration.
 
@@ -964,6 +964,7 @@ Use these tags consistently in this file and in future planning notes:
 - COMPLETED: Added one SAVE SETTINGS workflow for hardware controls, tone settings, client names, and routes.
 - COMPLETED: Added startup settings loading and automatic restoration of saved routes when matching client identities reconnect.
 - COMPLETED: Added browser client identity persistence, human-readable names, and simultaneous-identity conflict handling.
+- COMPLETED: Added `--plain-text` CLI mode with HTTP/WS transport and client-specific Chrome workaround guidance.
 
 ### DEPRECATING
 
