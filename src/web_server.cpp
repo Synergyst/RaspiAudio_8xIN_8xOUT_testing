@@ -389,9 +389,10 @@ bool WebServer::start() {
     if (m_running.exchange(true)) return true;
     const std::string certPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_CERT"); return value && *value ? std::string(value) : "./certs/server.crt"; }();
     const std::string keyPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_KEY"); return value && *value ? std::string(value) : "./certs/server.key"; }();
+    const std::string p12Path = [] { const char* value = std::getenv("CM5AUDIO_TLS_P12"); return value && *value ? std::string(value) : "./certs/server.p12"; }();
     const bool tlsEnabled = std::ifstream(certPath).good() && std::ifstream(keyPath).good();
 
-    m_httpThread = std::thread([this, certPath, keyPath, tlsEnabled] {
+    m_httpThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
         std::unique_ptr<httplib::Server> server;
         if (tlsEnabled) {
             auto ssl = std::make_unique<httplib::SSLServer>(certPath.c_str(), keyPath.c_str());
@@ -402,6 +403,42 @@ bool WebServer::start() {
             server = std::make_unique<httplib::Server>();
         }
         server->set_mount_point("/client", "./web_client");
+        server->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& response) {
+            std::ifstream certificate(certPath, std::ios::in | std::ios::binary);
+            if (!certificate) {
+                response.status = 404;
+                response.set_content("Certificate unavailable", "text/plain; charset=UTF-8");
+                return;
+            }
+            std::ostringstream contents;
+            contents << certificate.rdbuf();
+            response.set_header("Content-Disposition", "attachment; filename=server.crt");
+            response.set_content(contents.str(), "application/x-x509-ca-cert");
+        });
+        server->Get("/server.key", [keyPath](const httplib::Request&, httplib::Response& response) {
+            std::ifstream privateKey(keyPath, std::ios::in | std::ios::binary);
+            if (!privateKey) {
+                response.status = 404;
+                response.set_content("Private key unavailable", "text/plain; charset=UTF-8");
+                return;
+            }
+            std::ostringstream contents;
+            contents << privateKey.rdbuf();
+            response.set_header("Content-Disposition", "attachment; filename=server.key");
+            response.set_content(contents.str(), "application/x-pem-file");
+        });
+        server->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& response) {
+            std::ifstream bundle(p12Path, std::ios::in | std::ios::binary);
+            if (!bundle) {
+                response.status = 404;
+                response.set_content("PKCS#12 bundle unavailable; run setup.sh first", "text/plain; charset=UTF-8");
+                return;
+            }
+            std::ostringstream contents;
+            contents << bundle.rdbuf();
+            response.set_header("Content-Disposition", "attachment; filename=server.p12");
+            response.set_content(contents.str(), "application/x-pkcs12");
+        });
 
         auto meters = [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;

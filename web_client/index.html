@@ -12,6 +12,12 @@ body{background:#0f111a;color:#eceff4;font-family:'Segoe UI',monospace;display:f
 <div class="card">
 <h2>Client Audio Terminal</h2>
 <div class="field"><label for="ws-url">CM5 Server WebSocket URL</label><input type="text" id="ws-url"></div>
+<div class="field">
+<a href="/server.p12" download="server.p12">Download Android certificate bundle (.p12)</a><br>
+<a href="/server.crt" download="server.crt">Download server certificate (.crt)</a><br>
+<a href="/server.key" download="server.key">Download server private key (.key)</a>
+<div class="identity-note">For Android, download the .p12 bundle and install it as a VPN &amp; apps credential. Use password <code>cm5audio</code> when prompted, then restart Chrome. The .crt and .key downloads are provided only as separate troubleshooting files for this trusted LAN service.</div>
+</div>
 <div class="field"><label for="client-name">Client Name</label><input type="text" id="client-name" maxlength="80" placeholder="This browser client"><div class="identity-note">This name and client ID are saved in this browser. Reconnecting reuses the ID. A second active connection will ask before creating another saved ID.</div></div>
 <div class="btn-group"><button id="btn-start" class="btn-start" onclick="startAudio()" disabled>START AUDIO</button><button id="btn-stop" class="btn-stop" onclick="stopAudio()" disabled>STOP AUDIO</button></div>
 <div id="status" class="status-box">Loading WASM module...</div>

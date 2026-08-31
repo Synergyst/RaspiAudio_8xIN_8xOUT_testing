@@ -144,6 +144,21 @@ fi
 
 chmod 600 certs/server.key
 chmod 644 certs/server.crt
+
+# Create an Android-importable PKCS#12 bundle using broadly supported AES
+# encryption. The known password avoids Samsung's empty-password import issue.
+P12_PASSWORD="${CM5AUDIO_P12_PASSWORD:-cm5audio}"
+openssl pkcs12 -export \
+    -out certs/server.p12 \
+    -inkey certs/server.key \
+    -in certs/server.crt \
+    -passout pass:"$P12_PASSWORD" \
+    -name cm5audio \
+    -keypbe AES-256-CBC \
+    -certpbe AES-256-CBC \
+    -macalg SHA256 \
+    >/dev/null 2>&1
+chmod 600 certs/server.p12
 openssl x509 -in certs/server.crt -noout -subject -ext subjectAltName
 
 if [[ "$BUILD" -eq 1 ]]; then
