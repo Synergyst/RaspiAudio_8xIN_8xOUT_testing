@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "device_manager.h"
 #include <nlohmann/json.hpp>
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
@@ -159,8 +160,8 @@ std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, con
     session->id = id;
     session->remote_ip = remoteIp;
     session->set_identity("connection-" + std::to_string(id), "Client " + std::to_string(id));
-    session->incoming_rb.init(48000 * CM5_MAX_CHANNELS * sizeof(float));
-    session->outgoing_rb.init(48000 * CM5_MAX_CHANNELS * sizeof(float));
+    session->incoming_rb.init(ma_format_f32, 1, 48000);
+    session->outgoing_rb.init(ma_format_f32, 2, 48000);
     session->input_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
     session->output_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
     session->packet_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
@@ -384,8 +385,8 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
 }
 
 WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
-                     ClientManager& clientMgr, int httpPort, int wsPort, bool plainText)
-    : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr),
+                     ClientManager& clientMgr, DeviceManager& deviceMgr, int httpPort, int wsPort, bool plainText)
+    : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr), m_deviceMgr(deviceMgr),
       m_httpPort(httpPort), m_wsPort(wsPort), m_plainText(plainText) {}
 
 WebServer::~WebServer() { stop(); }
@@ -474,6 +475,21 @@ bool WebServer::start() {
             json << "]}";
             response.set_content(json.str(), "application/json");
         };
+        server->Get("/api/devices", [this](const httplib::Request&, httplib::Response& response) {
+            m_deviceMgr.enumerate_devices();
+            const auto devices = m_deviceMgr.get_available_devices();
+            nlohmann::json j = nlohmann::json::array();
+            for (const auto& d : devices) {
+                nlohmann::json dev_obj;
+                dev_obj["id"] = d.id;
+                dev_obj["name"] = d.name;
+                dev_obj["is_capture"] = d.is_capture;
+                dev_obj["channels"] = d.channels;
+                dev_obj["sample_rate"] = d.sample_rate;
+                j.push_back(dev_obj);
+            }
+            response.set_content(j.dump(2), "application/json");
+        });
         server->Get("/api/meters", meters);
         server->Get("/api/metrics", meters);
         server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {

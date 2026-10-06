@@ -11,16 +11,12 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include "miniaudio.h"
+#include "ring_buffer.h"
+#include "constants.h"
 
 namespace ix { class WebSocket; }
 
-constexpr unsigned CM5_MAX_CHANNELS = 8;
-constexpr unsigned CM5_MAX_AUDIO_FRAMES = 4096;
-
 struct ChannelMeter {
-    // Latest unscaled sample observed at the endpoint. Capture is the raw
-    // device input; playback is the final sample placed in the device output buffer.
     std::atomic<float> raw_value{0.0f};
     std::atomic<float> raw_peak{0.0f};
     std::atomic<float> rms_db{-60.0f};
@@ -50,53 +46,13 @@ struct ToneControls {
     std::atomic<float> amplitude{0.2f};
 };
 
-struct PcmRingBuffer {
-    std::vector<uint8_t> buffer;
-    size_t head = 0;
-    size_t tail = 0;
-    size_t count = 0;
-    size_t capacity = 0;
-    mutable std::mutex lock;
-
-    bool init(size_t capacityBytes) {
-        std::lock_guard<std::mutex> g(lock);
-        buffer.resize(capacityBytes);
-        capacity = capacityBytes;
-        head = tail = count = 0;
-        return true;
-    }
-    void uninit() {
-        std::lock_guard<std::mutex> g(lock);
-        buffer.clear();
-        capacity = head = tail = count = 0;
-    }
-    size_t write(const void* data, size_t bytes) {
-        std::lock_guard<std::mutex> g(lock);
-        if (!capacity || !bytes) return 0;
-        const size_t n = std::min(bytes, capacity - count);
-        const auto* src = static_cast<const uint8_t*>(data);
-        for (size_t i = 0; i < n; ++i) { buffer[head] = src[i]; head = (head + 1) % capacity; }
-        count += n;
-        return n;
-    }
-    size_t read(void* data, size_t bytes) {
-        std::lock_guard<std::mutex> g(lock);
-        if (!capacity || !bytes) return 0;
-        const size_t n = std::min(bytes, count);
-        auto* dst = static_cast<uint8_t*>(data);
-        for (size_t i = 0; i < n; ++i) { dst[i] = buffer[tail]; tail = (tail + 1) % capacity; }
-        count -= n;
-        return n;
-    }
-};
-
 struct WebClientSession {
     uint32_t id = 0;
     std::string remote_ip;
     std::shared_ptr<const std::string> client_key;
     std::shared_ptr<const std::string> client_name;
-    std::atomic<unsigned> input_channels{1};   // client -> server
-    std::atomic<unsigned> output_channels{2};  // server -> client
+    std::atomic<unsigned> input_channels{1};
+    std::atomic<unsigned> output_channels{2};
     PcmRingBuffer incoming_rb;
     PcmRingBuffer outgoing_rb;
     std::vector<float> input_block;
@@ -117,9 +73,9 @@ struct WebClientSession {
 
 struct AudioRoute {
     uint32_t id = 0;
-    std::string source_endpoint;      // hardware/capture or client/<id>/capture
+    std::string source_endpoint;
     unsigned source_channel = 0;
-    std::string destination_endpoint; // hardware/playback or client/<id>/playback
+    std::string destination_endpoint;
     unsigned destination_channel = 0;
     float gain = 1.0f;
     bool enabled = true;
@@ -153,10 +109,12 @@ private:
     std::atomic<uint32_t> m_next_route_id{1};
 };
 
+class DeviceManager;
+
 class WebServer {
 public:
     WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
-              ClientManager& clientMgr, int httpPort = 8182, int wsPort = 8183,
+              ClientManager& clientMgr, DeviceManager& deviceMgr, int httpPort = 8182, int wsPort = 8183,
               bool plainText = false);
     ~WebServer();
     bool start();
@@ -167,6 +125,7 @@ private:
     AudioControls& m_controls;
     ToneControls& m_tone;
     ClientManager& m_clientMgr;
+    DeviceManager& m_deviceMgr;
     int m_httpPort;
     int m_wsPort;
     bool m_plainText;

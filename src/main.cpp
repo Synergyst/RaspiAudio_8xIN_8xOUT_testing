@@ -1,5 +1,6 @@
 #include "miniaudio.h"
 #include "web_server.h"
+#include "device_manager.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -15,6 +16,7 @@ AudioMetrics g_metrics;
 AudioControls g_controls;
 ToneControls g_tone;
 ClientManager g_clientMgr;
+DeviceManager g_deviceMgr;
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) g_running = false;
@@ -118,7 +120,6 @@ void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 fram
         }
     }
 
-    // Pull each client's source stream once per block. Client input channels are negotiated.
     for (const auto& session : sessions) {
         const unsigned channels = std::clamp(session->input_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
         std::fill(session->input_block.begin(), session->input_block.begin() + frames * CM5_MAX_CHANNELS, 0.0f);
@@ -170,7 +171,7 @@ void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 fram
             pb_raw_peak[c] = std::max(pb_raw_peak[c], std::abs(raw_value));
             const float magnitude = std::abs(raw_value);
             pb_sum[c] += raw_value * raw_value;
-            pb_peak[c] = std::max(pb_peak[c], magnitude);
+            pb_peak[c] = std::max(pb_peak[c], std::abs(raw_value));
             if (magnitude >= 0.999f) g_metrics.playback[c].clipped.store(true, std::memory_order_relaxed);
         }
     }
@@ -221,7 +222,10 @@ int main(int argc, char** argv) {
               << (plainText ? " in plain-text mode..." : "...") << std::endl;
     g_clientMgr.load_settings(g_controls, g_tone);
 
-    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, 8182, 8183, plainText);
+    g_deviceMgr.enumerate_devices();
+    std::cout << "Detected " << g_deviceMgr.get_available_devices().size() << " audio devices." << std::endl;
+
+    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, g_deviceMgr, 8182, 8183, plainText);
     if (!webServer.start()) return -1;
 
     ma_device_config config = ma_device_config_init(ma_device_type_duplex);
