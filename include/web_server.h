@@ -81,9 +81,13 @@ struct AudioRoute {
     bool enabled = true;
 };
 
+class DeviceManager;
+class DspEngine;
+
 class ClientManager {
 public:
     ClientManager();
+    void set_device_manager(DeviceManager* dm) { m_deviceManager = dm; }
     std::shared_ptr<WebClientSession> create_session(uint32_t id, const std::string& remoteIp = "");
     void remove_session(uint32_t id);
     std::vector<std::shared_ptr<WebClientSession>> get_active_sessions();
@@ -107,10 +111,8 @@ private:
     std::shared_ptr<const std::vector<AudioRoute>> m_routes;
     std::unordered_map<std::string, std::string> m_known_client_names;
     std::atomic<uint32_t> m_next_route_id{1};
+    DeviceManager* m_deviceManager = nullptr;
 };
-
-class DeviceManager;
-class DspEngine;
 
 class WebServer {
 public:

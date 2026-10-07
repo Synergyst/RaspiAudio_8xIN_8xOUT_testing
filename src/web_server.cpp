@@ -21,12 +21,11 @@
 #include <thread>
 
 namespace {
-
 std::string json_escape(const std::string& value) {
     std::string result;
     result.reserve(value.size() + 8);
     for (const char ch : value) {
-        if (ch == '"' || ch == '\\') { result += '\\'; result += ch; }
+        if (ch == '\"' || ch == '\\') { result += '\\'; result += ch; }
         else if (ch == '\n') result += "\\n";
         else if (ch == '\r') result += "\\r";
         else result += ch;
@@ -82,9 +81,7 @@ std::string read_dashboard() {
     return contents.str();
 }
 
-void append_meter_json(std::ostringstream& json,
-                       const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters,
-                       unsigned channels) {
+void append_meter_json(std::ostringstream& json, const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters, unsigned channels) {
     channels = std::min(channels, CM5_MAX_CHANNELS);
     json << '[';
     for (unsigned i = 0; i < channels; ++i) {
@@ -100,26 +97,21 @@ void append_meter_json(std::ostringstream& json,
     }
     json << ']';
 }
-
-} // namespace
+}
 
 WebClientSession::~WebClientSession() { stop_sender(); }
-
 std::string WebClientSession::get_client_key() const {
     const auto key = std::atomic_load(&client_key);
     return key ? *key : std::string();
 }
-
 std::string WebClientSession::get_client_name() const {
     const auto name = std::atomic_load(&client_name);
     return name ? *name : std::string();
 }
-
 void WebClientSession::set_identity(const std::string& key, const std::string& name) {
     std::atomic_store(&client_key, std::make_shared<const std::string>(key));
     std::atomic_store(&client_name, std::make_shared<const std::string>(name));
 }
-
 void WebClientSession::start_sender(const std::shared_ptr<ix::WebSocket>& socket) {
     sender_thread = std::thread([this, socket] {
         std::vector<uint8_t> block(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS * sizeof(float));
@@ -132,25 +124,17 @@ void WebClientSession::start_sender(const std::shared_ptr<ix::WebSocket>& socket
         }
     });
 }
-
 void WebClientSession::stop_sender() {
     active.store(false, std::memory_order_relaxed);
     if (!sender_thread.joinable()) return;
-    if (sender_thread.get_id() == std::this_thread::get_id()) {
-        sender_thread.detach();
-        return;
-    }
+    if (sender_thread.get_id() == std::this_thread::get_id()) { sender_thread.detach(); return; }
     sender_thread.join();
 }
 
-ClientManager::ClientManager()
-    : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
+ClientManager::ClientManager() : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
     std::vector<AudioRoute> defaults;
     for (unsigned channel = 0; channel < CM5_MAX_CHANNELS; ++channel) {
-        defaults.push_back(AudioRoute{
-            m_next_route_id.fetch_add(1), "hardware/capture", channel,
-            "hardware/playback", channel, 1.0f, true
-        });
+        defaults.push_back(AudioRoute{m_next_route_id.fetch_add(1), "hardware/capture", channel, "hardware/playback", channel, 1.0f, true});
     }
     m_routes = std::make_shared<const std::vector<AudioRoute>>(std::move(defaults));
 }
@@ -158,8 +142,7 @@ ClientManager::ClientManager()
 std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, const std::string& remoteIp) {
     std::lock_guard<std::mutex> lock(m_lock);
     auto session = std::make_shared<WebClientSession>();
-    session->id = id;
-    session->remote_ip = remoteIp;
+    session->id = id; session->remote_ip = remoteIp;
     session->set_identity("connection-" + std::to_string(id), "Client " + std::to_string(id));
     session->incoming_rb.init(ma_format_f32, 1, 48000);
     session->outgoing_rb.init(ma_format_f32, 2, 48000);
@@ -175,11 +158,9 @@ void ClientManager::remove_session(uint32_t id) {
     std::shared_ptr<WebClientSession> removed;
     {
         std::lock_guard<std::mutex> lock(m_lock);
-        auto it = std::find_if(m_sessions.begin(), m_sessions.end(),
-            [id](const auto& session) { return session->id == id; });
+        auto it = std::find_if(m_sessions.begin(), m_sessions.end(), [id](const auto& s) { return s->id == id; });
         if (it == m_sessions.end()) return;
-        removed = *it;
-        m_sessions.erase(it);
+        removed = *it; m_sessions.erase(it);
     }
     removed->stop_sender();
 }
@@ -187,18 +168,15 @@ void ClientManager::remove_session(uint32_t id) {
 std::vector<std::shared_ptr<WebClientSession>> ClientManager::get_active_sessions() {
     std::lock_guard<std::mutex> lock(m_lock);
     std::vector<std::shared_ptr<WebClientSession>> active;
-    for (const auto& session : m_sessions)
-        if (session->active.load(std::memory_order_relaxed)) active.push_back(session);
+    for (const auto& s : m_sessions) if (s->active.load(std::memory_order_relaxed)) active.push_back(s);
     return active;
 }
 
-bool ClientManager::claim_identity(const std::shared_ptr<WebClientSession>& session,
-                                   const std::string& key, const std::string& name) {
+bool ClientManager::claim_identity(const std::shared_ptr<WebClientSession>& session, const std::string& key, const std::string& name) {
     if (key.empty()) return false;
     std::lock_guard<std::mutex> lock(m_lock);
     for (const auto& other : m_sessions) {
-        if (other.get() != session.get() && other->active.load(std::memory_order_relaxed) &&
-            other->get_client_key() == key) return false;
+        if (other.get() != session.get() && other->active.load(std::memory_order_relaxed) && other->get_client_key() == key) return false;
     }
     const std::string displayName = name.empty() ? key : name;
     session->set_identity(key, displayName);
@@ -214,10 +192,10 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
     try {
         const auto settings = nlohmann::json::parse(file);
         if (settings.contains("tone") && settings["tone"].is_object()) {
-            const auto& value = settings["tone"];
-            tone.enabled.store(value.value("enabled", false), std::memory_order_relaxed);
-            tone.frequency_hz.store(std::clamp(value.value("frequency_hz", 440.0f), 1.0f, 20000.0f), std::memory_order_relaxed);
-            tone.amplitude.store(std::clamp(value.value("amplitude", 0.2f), 0.0f, 1.0f), std::memory_order_relaxed);
+            const auto& v = settings["tone"];
+            tone.enabled.store(v.value("enabled", false), std::memory_order_relaxed);
+            tone.frequency_hz.store(std::clamp(v.value("frequency_hz", 440.0f), 1.0f, 20000.0f), std::memory_order_relaxed);
+            tone.amplitude.store(std::clamp(v.value("amplitude", 0.2f), 0.0f, 1.0f), std::memory_order_relaxed);
         }
         if (settings.contains("hardware") && settings["hardware"].is_object()) {
             const auto& hardware = settings["hardware"];
@@ -231,25 +209,23 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
             }
         }
         {
-            std::lock_guard<std::mutex> routeLock(m_route_lock);
-            std::lock_guard<std::mutex> sessionLock(m_lock);
+            std::lock_guard<std::mutex> rLock(m_route_lock);
+            std::lock_guard<std::mutex> sLock(m_lock);
             std::vector<AudioRoute> routes;
             uint32_t nextId = 1;
             if (settings.contains("routes") && settings["routes"].is_array()) {
-                for (const auto& value : settings["routes"]) {
-                    AudioRoute route;
-                    route.id = value.value("id", 0u);
-                    route.source_endpoint = value.value("source", "");
-                    route.source_channel = value.value("source_channel", CM5_MAX_CHANNELS);
-                    route.destination_endpoint = value.value("destination", "");
-                    route.destination_channel = value.value("destination_channel", CM5_MAX_CHANNELS);
-                    route.gain = value.value("gain", 1.0f);
-                    route.enabled = value.value("enabled", true);
-                    if (!route.id || route.source_endpoint.empty() || route.destination_endpoint.empty() ||
-                        route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS ||
-                        !std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) continue;
-                    routes.push_back(route);
-                    nextId = std::max(nextId, route.id + 1);
+                for (const auto& v : settings["routes"]) {
+                    AudioRoute r;
+                    r.id = v.value("id", 0u);
+                    r.source_endpoint = v.value("source", "");
+                    r.source_channel = v.value("source_channel", CM5_MAX_CHANNELS);
+                    r.destination_endpoint = v.value("destination", "");
+                    r.destination_channel = v.value("destination_channel", CM5_MAX_CHANNELS);
+                    r.gain = v.value("gain", 1.0f);
+                    r.enabled = v.value("enabled", true);
+                    if (!r.id || r.source_endpoint.empty() || r.destination_endpoint.empty() || r.source_channel >= CM5_MAX_CHANNELS || r.destination_channel >= CM5_MAX_CHANNELS || !std::isfinite(r.gain) || r.gain < 0.0f || r.gain > 8.0f) continue;
+                    routes.push_back(r);
+                    nextId = std::max(nextId, r.id + 1);
                 }
             }
             std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
@@ -261,9 +237,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
             }
         }
         return true;
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
 }
 
 bool ClientManager::save_settings(const AudioControls& controls, const ToneControls& tone) const {
@@ -272,36 +246,25 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     const std::string temporaryPath = path + ".tmp";
     nlohmann::json settings;
     settings["version"] = 1;
-    settings["tone"] = {
-        {"enabled", tone.enabled.load(std::memory_order_relaxed)},
-        {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)},
-        {"amplitude", tone.amplitude.load(std::memory_order_relaxed)}
-    };
+    settings["tone"] = {{"enabled", tone.enabled.load(std::memory_order_relaxed)}, {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)}, {"amplitude", tone.amplitude.load(std::memory_order_relaxed)}};
     for (const auto* type : {"capture", "playback"}) {
         const auto& bank = std::string(type) == "capture" ? controls.capture : controls.playback;
         settings["hardware"][type] = nlohmann::json::array();
         for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i)
-            settings["hardware"][type].push_back({
-                {"gain", bank[i].gain.load(std::memory_order_relaxed)},
-                {"mute", bank[i].mute.load(std::memory_order_relaxed)}
-            });
+            settings["hardware"][type].push_back({{"gain", bank[i].gain.load(std::memory_order_relaxed)}, {"mute", bank[i].mute.load(std::memory_order_relaxed)}});
     }
     {
-        std::lock_guard<std::mutex> routeLock(m_route_lock);
-        std::lock_guard<std::mutex> sessionLock(m_lock);
+        std::lock_guard<std::mutex> rLock(m_route_lock);
+        std::lock_guard<std::mutex> sLock(m_lock);
         settings["routes"] = nlohmann::json::array();
-        for (const auto& route : *std::atomic_load(&m_routes)) {
-            settings["routes"].push_back({
-                {"id", route.id}, {"source", route.source_endpoint}, {"source_channel", route.source_channel},
-                {"destination", route.destination_endpoint}, {"destination_channel", route.destination_channel},
-                {"gain", route.gain}, {"enabled", route.enabled}
-            });
+        for (const auto& r : *std::atomic_load(&m_routes)) {
+            settings["routes"].push_back({{"id", r.id}, {"source", r.source_endpoint}, {"source_channel", r.source_channel}, {"destination", r.destination_endpoint}, {"destination_channel", r.destination_channel}, {"gain", r.gain}, {"enabled", r.enabled}});
         }
         settings["clients"] = nlohmann::json::object();
         for (const auto& client : m_known_client_names) settings["clients"][client.first] = client.second;
-        for (const auto& session : m_sessions) {
-            const std::string key = session->get_client_key();
-            if (!key.empty()) settings["clients"][key] = session->get_client_name();
+        for (const auto& s : m_sessions) {
+            const std::string key = s->get_client_key();
+            if (!key.empty()) settings["clients"][key] = s->get_client_name();
         }
     }
     try {
@@ -310,10 +273,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
         file << settings.dump(2) << '\n';
         file.close();
         return std::rename(temporaryPath.c_str(), path.c_str()) == 0;
-    } catch (...) {
-        std::remove(temporaryPath.c_str());
-        return false;
-    }
+    } catch (...) { std::remove(temporaryPath.c_str()); return false; }
 }
 
 std::unordered_map<std::string, std::string> ClientManager::known_client_names() const {
@@ -326,21 +286,37 @@ std::shared_ptr<const std::vector<AudioRoute>> ClientManager::route_snapshot() c
 }
 
 std::vector<AudioRoute> ClientManager::get_routes() const {
-    const auto routes = route_snapshot();
-    return *routes;
+    return *route_snapshot();
 }
 
 bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) const {
     if (source && (endpoint == "hardware/capture" || endpoint == "tone/generator")) return true;
     if (!source && endpoint == "hardware/playback") return true;
+    if (m_deviceManager) {
+        const std::string capPrefix = "hardware/capture/";
+        const std::string pbPrefix = "hardware/playback/";
+        if (source && endpoint.compare(0, capPrefix.size(), capPrefix) == 0) {
+            std::string name = endpoint.substr(capPrefix.size());
+            if (name.empty()) return false;
+            for (const auto& dev : m_deviceManager->get_active_devices())
+                if (dev->get_info().name == name && dev->get_info().is_capture) return true;
+            return false;
+        }
+        if (!source && endpoint.compare(0, pbPrefix.size(), pbPrefix) == 0) {
+            std::string name = endpoint.substr(pbPrefix.size());
+            if (name.empty()) return false;
+            for (const auto& dev : m_deviceManager->get_active_devices())
+                if (dev->get_info().name == name && !dev->get_info().is_capture) return true;
+            return false;
+        }
+    }
     const std::string prefix = "client/";
     const std::string suffix = source ? "/capture" : "/playback";
-    if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 ||
-        endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+    if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 || endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
     const std::string key = endpoint.substr(prefix.size(), endpoint.size() - prefix.size() - suffix.size());
     if (key.empty()) return false;
-    for (const auto& session : m_sessions)
-        if (session->get_client_key() == key && session->active.load(std::memory_order_relaxed)) return true;
+    for (const auto& s : m_sessions)
+        if (s->get_client_key() == key && s->active.load(std::memory_order_relaxed)) return true;
     return m_known_client_names.find(key) != m_known_client_names.end();
 }
 
@@ -351,8 +327,8 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
     if (!std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) {
         error = "gain must be finite and between 0 and 8"; return false;
     }
-    std::lock_guard<std::mutex> routeLock(m_route_lock);
-    std::lock_guard<std::mutex> sessionLock(m_lock);
+    std::lock_guard<std::mutex> rLock(m_route_lock);
+    std::lock_guard<std::mutex> sLock(m_lock);
     if (!endpoint_exists(route.source_endpoint, true) || !endpoint_exists(route.destination_endpoint, false)) {
         error = "source or destination endpoint is unavailable"; return false;
     }
@@ -367,7 +343,7 @@ bool ClientManager::remove_route(uint32_t routeId) {
     std::lock_guard<std::mutex> lock(m_route_lock);
     auto routes = *std::atomic_load(&m_routes);
     const auto oldSize = routes.size();
-    routes.erase(std::remove_if(routes.begin(), routes.end(), [routeId](const auto& route) { return route.id == routeId; }), routes.end());
+    routes.erase(std::remove_if(routes.begin(), routes.end(), [routeId](const auto& r) { return r.id == routeId; }), routes.end());
     if (routes.size() == oldSize) return false;
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
     return true;
@@ -377,10 +353,9 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
     if (!std::isfinite(gain) || gain < 0.0f || gain > 8.0f) return false;
     std::lock_guard<std::mutex> lock(m_route_lock);
     auto routes = *std::atomic_load(&m_routes);
-    auto it = std::find_if(routes.begin(), routes.end(), [routeId](const auto& route) { return route.id == routeId; });
+    auto it = std::find_if(routes.begin(), routes.end(), [routeId](const auto& r) { return r.id == routeId; });
     if (it == routes.end()) return false;
-    it->gain = gain;
-    it->enabled = enabled;
+    it->gain = gain; it->enabled = enabled;
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
     return true;
 }
@@ -394,9 +369,9 @@ WebServer::~WebServer() { stop(); }
 
 bool WebServer::start() {
     if (m_running.exchange(true)) return true;
-    const std::string certPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_CERT"); return value && *value ? std::string(value) : "./certs/server.crt"; }();
-    const std::string keyPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_KEY"); return value && *value ? std::string(value) : "./certs/server.key"; }();
-    const std::string p12Path = [] { const char* value = std::getenv("CM5AUDIO_TLS_P12"); return value && *value ? std::string(value) : "./certs/server.p12"; }();
+    const std::string certPath = [] { const char* v = std::getenv("CM5AUDIO_TLS_CERT"); return v && *v ? std::string(v) : "./certs/server.crt"; }();
+    const std::string keyPath = [] { const char* v = std::getenv("CM5AUDIO_TLS_KEY"); return v && *v ? std::string(v) : "./certs/server.key"; }();
+    const std::string p12Path = [] { const char* v = std::getenv("CM5AUDIO_TLS_P12"); return v && *v ? std::string(v) : "./certs/server.p12"; }();
     const bool tlsEnabled = !m_plainText && std::ifstream(certPath).good() && std::ifstream(keyPath).good();
 
     m_httpThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
@@ -410,174 +385,131 @@ bool WebServer::start() {
             server = std::make_unique<httplib::Server>();
         }
         server->set_mount_point("/client", "./web_client");
-        server->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& response) {
-            std::ifstream certificate(certPath, std::ios::in | std::ios::binary);
-            if (!certificate) {
-                response.status = 404;
-                response.set_content("Certificate unavailable", "text/plain; charset=UTF-8");
-                return;
-            }
-            std::ostringstream contents;
-            contents << certificate.rdbuf();
-            response.set_header("Content-Disposition", "attachment; filename=server.crt");
-            response.set_content(contents.str(), "application/x-x509-ca-cert");
+        server->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& res) {
+            std::ifstream file(certPath, std::ios::in | std::ios::binary);
+            if (!file) { res.status = 404; res.set_content("Certificate unavailable", "text/plain; charset=UTF-8"); return; }
+            std::ostringstream contents; contents << file.rdbuf();
+            res.set_header("Content-Disposition", "attachment; filename=server.crt");
+            res.set_content(contents.str(), "application/x-x509-ca-cert");
         });
-        server->Get("/server.key", [keyPath](const httplib::Request&, httplib::Response& response) {
-            std::ifstream privateKey(keyPath, std::ios::in | std::ios::binary);
-            if (!privateKey) {
-                response.status = 404;
-                response.set_content("Private key unavailable", "text/plain; charset=UTF-8");
-                return;
-            }
-            std::ostringstream contents;
-            contents << privateKey.rdbuf();
-            response.set_header("Content-Disposition", "attachment; filename=server.key");
-            response.set_content(contents.str(), "application/x-pem-file");
+        server->Get("/server.key", [keyPath](const httplib::Request&, httplib::Response& res) {
+            std::ifstream file(keyPath, std::ios::in | std::ios::binary);
+            if (!file) { res.status = 404; res.set_content("Private key unavailable", "text/plain; charset=UTF-8"); return; }
+            std::ostringstream contents; contents << file.rdbuf();
+            res.set_header("Content-Disposition", "attachment; filename=server.key");
+            res.set_content(contents.str(), "application/x-pem-file");
         });
-        server->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& response) {
-            std::ifstream bundle(p12Path, std::ios::in | std::ios::binary);
-            if (!bundle) {
-                response.status = 404;
-                response.set_content("PKCS#12 bundle unavailable; run setup.sh first", "text/plain; charset=UTF-8");
-                return;
-            }
-            std::ostringstream contents;
-            contents << bundle.rdbuf();
-            response.set_header("Content-Disposition", "attachment; filename=server.p12");
-            response.set_content(contents.str(), "application/x-pkcs12");
+        server->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& res) {
+            std::ifstream file(p12Path, std::ios::in | std::ios::binary);
+            if (!file) { res.status = 404; res.set_content("PKCS#12 bundle unavailable; run setup.sh first", "text/plain; charset=UTF-8"); return; }
+            std::ostringstream contents; contents << file.rdbuf();
+            res.set_header("Content-Disposition", "attachment; filename=server.p12");
+            res.set_content(contents.str(), "application/x-pkcs12");
         });
 
-        auto meters = [this](const httplib::Request&, httplib::Response& response) {
+        auto meters = [this](const httplib::Request&, httplib::Response& res) {
             std::ostringstream json;
             json << "{\"capture\":[";
             for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.capture[i];
-                json << "{\"ch\":" << i
-                     << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
-                     << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
-                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
-                     << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                const auto& m = m_metrics.capture[i];
+                json << "{\"ch\":" << i << ",\"raw_value\":" << m.raw_value.load() << ",\"raw_peak\":" << m.raw_peak.load() << ",\"rms_db\":" << m.rms_db.load() << ",\"peak_db\":" << m.peak_db.load() << ",\"peak_hold_db\":" << m.peak_hold_db.load() << ",\"clipped\":" << (m.clipped.load() ? "true" : "false") << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
             }
-            json << "],\"playback\":[";
+            json << "playback\":[";
             for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.playback[i];
-                json << "{\"ch\":" << i
-                     << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
-                     << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
-                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
-                     << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                const auto& m = m_metrics.playback[i];
+                json << "{\"ch\":" << i << ",\"raw_value\":" << m.raw_value.load() << ",\"raw_peak\":" << m.raw_peak.load() << ",\"rms_db\":" << m.rms_db.load() << ",\"peak_db\":" << m.peak_db.load() << ",\"peak_hold_db\":" << m.peak_hold_db.load() << ",\"clipped\":" << (m.clipped.load() ? "true" : "false") << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
             }
             json << "]}";
-            response.set_content(json.str(), "application/json");
+            res.set_content(json.str(), "application/json");
         };
-        server->Get("/api/devices", [this](const httplib::Request&, httplib::Response& response) {
+        server->Get("/api/devices", [this](const httplib::Request&, httplib::Response& res) {
             m_deviceMgr.enumerate_devices();
             const auto devices = m_deviceMgr.get_available_devices();
             nlohmann::json j = nlohmann::json::array();
             for (const auto& d : devices) {
-                nlohmann::json dev_obj;
-                dev_obj["id"] = d.id;
-                dev_obj["name"] = d.name;
-                dev_obj["is_capture"] = d.is_capture;
-                dev_obj["channels"] = d.channels;
-                dev_obj["sample_rate"] = d.sample_rate;
-                j.push_back(dev_obj);
+                nlohmann::json obj;
+                obj["id"] = d.id.alsa; obj["name"] = d.name; obj["is_capture"] = d.is_capture; obj["channels"] = d.channels; obj["sample_rate"] = d.sample_rate;
+                j.push_back(obj);
             }
-            response.set_content(j.dump(2), "application/json");
+            res.set_content(j.dump(2), "application/json");
         });
         server->Get("/api/meters", meters);
         server->Get("/api/metrics", meters);
-        server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
+        server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& res) {
             std::ostringstream json;
             json << "{\"capture\":[";
             for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.capture[i];
-                json << "{\"ch\":" << i
-                     << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                const auto& m = m_metrics.capture[i];
+                json << "{\"ch\":" << i << ",\"value\":" << m.raw_value.load() << ",\"peak\":" << m.raw_peak.load() << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
             }
             json << "],\"playback\":[";
             for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.playback[i];
-                json << "{\"ch\":" << i
-                     << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                const auto& m = m_metrics.playback[i];
+                json << "{\"ch\":" << i << ",\"value\":" << m.raw_value.load() << ",\"peak\":" << m.raw_peak.load() << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
             }
             json << "]}";
-            response.set_content(json.str(), "application/json");
+            res.set_content(json.str(), "application/json");
         });
 
-        server->Get("/api/tone", [this](const httplib::Request&, httplib::Response& response) {
+        server->Get("/api/tone", [this](const httplib::Request&, httplib::Response& res) {
             std::ostringstream json;
-            json << "{\"enabled\":" << (m_tone.enabled.load() ? "true" : "false")
-                 << ",\"frequency_hz\":" << m_tone.frequency_hz.load()
-                 << ",\"amplitude\":" << m_tone.amplitude.load() << '}';
-            response.set_content(json.str(), "application/json");
+            json << "{\"enabled\":" << (m_tone.enabled.load() ? "true" : "false") << ",\"frequency_hz\":" << m_tone.frequency_hz.load() << ",\"amplitude\":" << m_tone.amplitude.load() << "}";
+            res.set_content(json.str(), "application/json");
         });
-        server->Post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
+        server->Post("/api/tone", [this](const httplib::Request& req, httplib::Response& res) {
             try {
-                if (request.has_param("enabled")) m_tone.enabled.store(query_bool(request, "enabled", false));
-                if (request.has_param("frequency")) {
-                    const float frequency = query_float(request, "frequency", -1.0f);
-                    if (!std::isfinite(frequency) || frequency < 1.0f || frequency > 20000.0f) throw std::invalid_argument("frequency must be 1..20000 Hz");
-                    m_tone.frequency_hz.store(frequency);
+                if (req.has_param("enabled")) m_tone.enabled.store(query_bool(req, "enabled", false));
+                if (req.has_param("frequency")) {
+                    float f = query_float(req, "frequency", -1.0f);
+                    if (!std::isfinite(f) || f < 1.0f || f > 20000.0f) throw std::invalid_argument("frequency must be 1..20000 Hz");
+                    m_tone.frequency_hz.store(f);
                 }
-                if (request.has_param("amplitude")) {
-                    const float amplitude = query_float(request, "amplitude", -1.0f);
-                    if (!std::isfinite(amplitude) || amplitude < 0.0f || amplitude > 1.0f) throw std::invalid_argument("amplitude must be 0..1");
-                    m_tone.amplitude.store(amplitude);
+                if (req.has_param("amplitude")) {
+                    float a = query_float(req, "amplitude", -1.0f);
+                    if (!std::isfinite(a) || a < 0.0f || a > 1.0f) throw std::invalid_argument("amplitude must be 0..1");
+                    m_tone.amplitude.store(a);
                 }
-                response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& error) {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
-            }
-        });
-
-        server->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& response) {
-            auto* gainProc = m_dspEngine.get_gain_processor();
-            auto* compProc = m_dspEngine.get_compressor();
-            nlohmann::json j;
-            j["gain"] = gainProc ? gainProc->get_gain() : 1.0f;
-            j["threshold"] = compProc ? compProc->get_threshold() : 0.5f;
-            j["ratio"] = compProc ? compProc->get_ratio() : 4.0f;
-            response.set_content(j.dump(2), "application/json");
-        });
-        server->Post("/api/dsp", [this](const httplib::Request& request, httplib::Response& response) {
-            try {
-                auto* gainProc = m_dspEngine.get_gain_processor();
-                auto* compProc = m_dspEngine.get_compressor();
-                if (request.has_param("gain")) {
-                    float g = query_float(request, "gain", -1.0f);
-                    if (g < 0.0f || !std::isfinite(g)) throw std::invalid_argument("gain must be >= 0");
-                    if (gainProc) gainProc->set_gain(g);
-                }
-                if (request.has_param("threshold")) {
-                    float t = query_float(request, "threshold", -1.0f);
-                    if (t < 0.0f || !std::isfinite(t)) throw std::invalid_argument("threshold must be >= 0");
-                    if (compProc) compProc->set_threshold(t);
-                }
-                if (request.has_param("ratio")) {
-                    float r = query_float(request, "ratio", -1.0f);
-                    if (r < 1.0f || !std::isfinite(r)) throw std::invalid_argument("ratio must be >= 1");
-                    if (compProc) compProc->set_ratio(r);
-                }
-                response.set_content("{\"status\":\"ok\"}", "application/json");
+                res.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& e) {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
+                res.status = 400; res.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
             }
         });
 
-        server->Get("/api/clients", [this](const httplib::Request&, httplib::Response& response) {
+        server->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& res) {
+            auto* gp = m_dspEngine.get_gain_processor();
+            auto* cp = m_dspEngine.get_compressor();
+            nlohmann::json j;
+            j["gain"] = gp ? gp->get_gain() : 1.0f;
+            j["threshold"] = cp ? cp->get_threshold() : 0.5f;
+            j["ratio"] = cp ? cp->get_ratio() : 4.0f;
+            res.set_content(j.dump(2), "application/json");
+        });
+        server->Post("/api/dsp", [this](const httplib::Request& req, httplib::Response& res) {
+            try {
+                auto* gp = m_dspEngine.get_gain_processor();
+                auto* cp = m_dspEngine.get_compressor();
+                if (req.has_param("gain")) {
+                    float g = query_float(req, "gain", -1.0f);
+                    if (g < 0.0f || !std::isfinite(g)) throw std::invalid_argument("gain must be >= 0");
+                    if (gp) gp->set_gain(g);
+                }
+                if (req.has_param("threshold")) {
+                    float t = query_float(req, "threshold", -1.0f);
+                    if (t < 0.0f || !std::isfinite(t)) throw std::invalid_argument("threshold must be >= 0");
+                    if (cp) cp->set_threshold(t);
+                }
+                if (req.has_param("ratio")) {
+                    float r = query_float(req, "ratio", -1.0f);
+                    if (r < 1.0f || !std::isfinite(r)) throw std::invalid_argument("ratio must be >= 1");
+                    if (cp) cp->set_ratio(r);
+                }
+                res.set_content("{\"status\":\"ok\"}", "application/json");
+            } catch (const std::exception& e) {
+                res.status = 400; res.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
+            }
+        });
+
+        server->Get("/api/clients", [this](const httplib::Request&, httplib::Response& res) {
             const auto sessions = m_clientMgr.get_active_sessions();
             std::ostringstream json;
             json << "{\"clients\":[";
@@ -595,30 +527,26 @@ bool WebServer::start() {
                 json << "}" << (i + 1 == sessions.size() ? "" : ",");
             }
             json << "]}";
-            response.set_content(json.str(), "application/json");
+            res.set_content(json.str(), "application/json");
         });
 
-        server->Get("/api/graph", [this](const httplib::Request&, httplib::Response& response) {
+        server->Get("/api/graph", [this](const httplib::Request&, httplib::Response& res) {
             const auto sessions = m_clientMgr.get_active_sessions();
             const auto routes = m_clientMgr.get_routes();
             std::ostringstream json;
             json << "{\"revision\":1,\"endpoints\":[{\"id\":\"hardware/capture\",\"direction\":\"source\",\"channels\":8},{\"id\":\"tone/generator\",\"direction\":\"source\",\"channels\":8},{\"id\":\"hardware/playback\",\"direction\":\"destination\",\"channels\":8}";
             for (const auto& s : sessions) {
-                json << ",{\"id\":\"client/" << json_escape(s->get_client_key()) << "/capture\",\"name\":\""
-                     << json_escape(s->get_client_name()) << "\",\"connected\":true,\"direction\":\"source\",\"channels\":" << s->input_channels.load() << "}"
-                     << ",{\"id\":\"client/" << json_escape(s->get_client_key()) << "/playback\",\"name\":\""
-                     << json_escape(s->get_client_name()) << "\",\"connected\":true,\"direction\":\"destination\",\"channels\":" << s->output_channels.load() << "}";
+                json << ",{\"id\":\"client/" << json_escape(s->get_client_key()) << "/capture\",\"name\":\"" << json_escape(s->get_client_name()) << "\",\"connected\":true,\"direction\":\"source\",\"channels\":" << s->input_channels.load() << "}"
+                     << ",{\"id\":\"client/" << json_escape(s->get_client_key()) << "/playback\",\"name\":\"" << json_escape(s->get_client_name()) << "\",\"connected\":true,\"direction\":\"destination\",\"channels\":" << s->output_channels.load() << "}";
             }
             for (const auto& known : m_clientMgr.known_client_names()) {
                 bool active = false;
                 for (const auto& s : sessions) active = active || s->get_client_key() == known.first;
                 if (active) continue;
-                json << ",{\"id\":\"client/" << json_escape(known.first) << "/capture\",\"name\":\""
-                     << json_escape(known.second) << "\",\"connected\":false,\"direction\":\"source\",\"channels\":1}"
-                     << ",{\"id\":\"client/" << json_escape(known.first) << "/playback\",\"name\":\""
-                     << json_escape(known.second) << "\",\"connected\":false,\"direction\":\"destination\",\"channels\":2}";
+                json << ",{\"id\":\"client/" << json_escape(known.first) << "/capture\",\"name\":\"" << json_escape(known.second) << "\",\"connected\":false,\"direction\":\"source\",\"channels\":1}"
+                     << ",{\"id\":\"client/" << json_escape(known.first) << "/playback\",\"name\":\"" << json_escape(known.second) << "\",\"connected\":false,\"direction\":\"destination\",\"channels\":2}";
             }
-            json << "],\"routes\":[";
+            json << "routes\":[";
             for (size_t i = 0; i < routes.size(); ++i) {
                 const auto& r = routes[i];
                 json << "{\"id\":" << r.id << ",\"source\":\"" << json_escape(r.source_endpoint) << "\",\"source_channel\":" << r.source_channel
@@ -627,86 +555,83 @@ bool WebServer::start() {
                 if (i + 1 != routes.size()) json << ',';
             }
             json << "]}";
-            response.set_content(json.str(), "application/json");
+            res.set_content(json.str(), "application/json");
         });
 
-        server->Post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
+        server->Post("/api/routes", [this](const httplib::Request& req, httplib::Response& res) {
             AudioRoute route;
-            route.source_endpoint = request.has_param("source") ? request.get_param_value("source") : "";
-            route.destination_endpoint = request.has_param("destination") ? request.get_param_value("destination") : "";
-            route.source_channel = query_uint(request, "source_ch", 99);
-            route.destination_channel = query_uint(request, "destination_ch", 99);
-            route.gain = query_float(request, "gain", 1.0f);
-            route.enabled = query_bool(request, "enabled", true);
+            route.source_endpoint = req.has_param("source") ? req.get_param_value("source") : "";
+            route.destination_endpoint = req.has_param("destination") ? req.get_param_value("destination") : "";
+            route.source_channel = query_uint(req, "source_ch", 99);
+            route.destination_channel = query_uint(req, "destination_ch", 99);
+            route.gain = query_float(req, "gain", 1.0f);
+            route.enabled = query_bool(req, "enabled", true);
             uint32_t id = 0; std::string error;
             if (!m_clientMgr.add_route(std::move(route), id, error)) {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}", "application/json");
+                res.status = 400; res.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}", "application/json");
                 return;
             }
-            response.set_content("{\"status\":\"ok\",\"id\":" + std::to_string(id) + "}", "application/json");
+            res.set_content("{\"status\":\"ok\",\"id\":" + std::to_string(id) + "}", "application/json");
         });
-        server->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
-            const uint32_t id = query_uint(request, "id", 0);
-            uint32_t routeId = id;
-            if (request.matches.size() > 1) { try { routeId = static_cast<uint32_t>(std::stoul(request.matches[1])); } catch (...) {} }
-            if (!m_clientMgr.remove_route(routeId)) { response.status = 404; response.set_content("{\"status\":\"error\"}", "application/json"); return; }
-            response.set_content("{\"status\":\"ok\"}", "application/json");
+        server->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+            uint32_t routeId = 0;
+            if (req.matches.size() > 1) { try { routeId = static_cast<uint32_t>(std::stoul(req.matches[1])); } catch (...) {} }
+            if (!m_clientMgr.remove_route(routeId)) { res.status = 404; res.set_content("{\"status\":\"error\"}", "application/json"); return; }
+            res.set_content("{\"status\":\"ok\"}", "application/json");
         });
-        server->Post("/api/routes/update", [this](const httplib::Request& request, httplib::Response& response) {
-            const uint32_t id = query_uint(request, "id", 0);
-            if (!id || !m_clientMgr.update_route(id, query_float(request, "gain", 1.0f), query_bool(request, "enabled", true))) {
-                response.status = 400; response.set_content("{\"status\":\"error\"}", "application/json"); return;
+        server->Post("/api/routes/update", [this](const httplib::Request& req, httplib::Response& res) {
+            const uint32_t id = query_uint(req, "id", 0);
+            if (!id || !m_clientMgr.update_route(id, query_float(req, "gain", 1.0f), query_bool(req, "enabled", true))) {
+                res.status = 400; res.set_content("{\"status\":\"error\"}", "application/json"); return;
             }
-            response.set_content("{\"status\":\"ok\"}", "application/json");
+            res.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
-        server->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
+        server->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& res) {
             if (!m_clientMgr.save_settings(m_controls, m_tone)) {
-                response.status = 500;
-                response.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
+                res.status = 500; res.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
                 return;
             }
-            response.set_content("{\"status\":\"ok\"}", "application/json");
+            res.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
-        server->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
+        server->Post("/api/control", [this](const httplib::Request& req, httplib::Response& res) {
             try {
-                const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
-                const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
+                const std::string type = req.has_param("type") ? req.get_param_value("type") : "";
+                const int channel = req.has_param("ch") ? std::stoi(req.get_param_value("ch")) : -1;
                 if ((type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid channel");
                 auto& control = type == "playback" ? m_controls.playback[channel] : m_controls.capture[channel];
-                if (request.has_param("gain")) {
-                    const float gain = std::stof(request.get_param_value("gain"));
+                if (req.has_param("gain")) {
+                    const float gain = std::stof(req.get_param_value("gain"));
                     if (!std::isfinite(gain) || gain < 0.0f || gain > 8.0f) throw std::invalid_argument("invalid gain");
                     control.gain.store(gain);
                 }
-                if (request.has_param("mute")) control.mute.store(request.get_param_value("mute") == "1");
-                response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (...) { response.status = 400; response.set_content("{\"status\":\"error\"}", "application/json"); }
+                if (req.has_param("mute")) control.mute.store(req.get_param_value("mute") == "1");
+                res.set_content("{\"status\":\"ok\"}", "application/json");
+            } catch (...) { res.status = 400; res.set_content("{\"status\":\"error\"}", "application/json"); }
         });
-        server->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
+        server->Post("/api/reset_clips", [this](const httplib::Request& req, httplib::Response& res) {
             try {
-                if (request.has_param("all")) for (unsigned i = 0; i < 8; ++i) {
+                if (req.has_param("all")) for (unsigned i = 0; i < 8; ++i) {
                     m_metrics.capture[i].clipped.store(false); m_metrics.capture[i].peak_hold_db.store(-60.0f);
                     m_metrics.playback[i].clipped.store(false); m_metrics.playback[i].peak_hold_db.store(-60.0f);
                 }
                 else {
-                    const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
-                    const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
+                    const std::string type = req.has_param("type") ? req.get_param_value("type") : "";
+                    const int channel = req.has_param("ch") ? std::stoi(req.get_param_value("ch")) : -1;
                     if ((type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid channel");
                     auto& meter = type == "playback" ? m_metrics.playback[channel] : m_metrics.capture[channel];
                     meter.clipped.store(false); meter.peak_hold_db.store(-60.0f);
                 }
-                response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (...) { response.status = 400; response.set_content("{\"status\":\"error\"}", "application/json"); }
+                res.set_content("{\"status\":\"ok\"}", "application/json");
+            } catch (...) { res.status = 400; res.set_content("{\"status\":\"error\"}", "application/json"); }
         });
-        server->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html; charset=UTF-8"); });
+        server->Get("/", [](const httplib::Request&, httplib::Response& res) { res.set_content(read_dashboard(), "text/html; charset=UTF-8"); });
         std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://0.0.0.0:" << m_httpPort << std::endl;
         server->listen("0.0.0.0", m_httpPort);
     });
 
-    m_wsThread = std::thread([this, certPath, keyPath, tlsEnabled] {
+    m_wsThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
         ix::WebSocketServer server(m_wsPort, "0.0.0.0");
         if (m_plainText) std::cerr << "[WS] Plain WS enabled" << std::endl;
         if (tlsEnabled) {
@@ -721,9 +646,7 @@ bool WebServer::start() {
             const uint32_t id = nextId.fetch_add(1);
             const auto session = m_clientMgr.create_session(id, state ? state->getRemoteIp() : "");
             session->start_sender(socket);
-            socket->sendText(nlohmann::json{{"type", "assigned"}, {"connection_id", id},
-                                            {"client_id", session->get_client_key()},
-                                            {"name", session->get_client_name()}}.dump());
+            socket->sendText(nlohmann::json{{"type", "assigned"}, {"connection_id", id}, {"client_id", session->get_client_key()}, {"name", session->get_client_name()}}.dump());
             socket->setOnMessageCallback([this, session, id, socket](const ix::WebSocketMessagePtr& message) {
                 if (message->type == ix::WebSocketMessageType::Message && message->binary && !message->str.empty()) {
                     session->incoming_rb.write(message->str.data(), message->str.size());
@@ -737,9 +660,7 @@ bool WebServer::start() {
                         } else {
                             session->input_channels.store(std::clamp(input, 1u, CM5_MAX_CHANNELS), std::memory_order_relaxed);
                             session->output_channels.store(std::clamp(output, 1u, CM5_MAX_CHANNELS), std::memory_order_relaxed);
-                            socket->sendText(nlohmann::json{{"type", "identity_accepted"},
-                                                            {"client_id", session->get_client_key()},
-                                                            {"name", session->get_client_name()}}.dump());
+                            socket->sendText(nlohmann::json{{"type", "identity_accepted"}, {"client_id", session->get_client_key()}, {"name", session->get_client_name()}}.dump());
                         }
                     }
                 } else if (message->type == ix::WebSocketMessageType::Close) {

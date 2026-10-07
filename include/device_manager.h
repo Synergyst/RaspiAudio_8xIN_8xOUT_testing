@@ -11,7 +11,7 @@
 #include <unordered_map>
 
 struct AudioDeviceInfo {
-    std::string id;
+    ma_device_id id;
     std::string name;
     bool is_capture;
     unsigned channels;
