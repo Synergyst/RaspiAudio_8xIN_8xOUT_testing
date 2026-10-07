@@ -47,8 +47,8 @@ public:
     void enumerate_devices();
     std::vector<AudioDeviceInfo> get_available_devices();
     std::vector<std::shared_ptr<HardwareDevice>> get_active_devices();
-    bool activate_device(const std::string& id);
-    void deactivate_device(const std::string& id);
+    bool activate_device(const std::string& name);
+    void deactivate_device(const std::string& name);
     void stop_all();
 
 private:

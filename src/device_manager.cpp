@@ -39,7 +39,7 @@ bool HardwareDevice::init() {
     config.dataCallback = HardwareDevice::data_callback;
     config.pUserData = this;
 
-    if (ma_device_init(NULL, &config, &m_device) != MA_SUCCESS) {
+    if (ma_device_init(m_info.id.c_str(), &config, &m_device) != MA_SUCCESS) {
         return false;
     }
 
@@ -143,23 +143,23 @@ std::vector<std::shared_ptr<HardwareDevice>> DeviceManager::get_active_devices()
     return active;
 }
 
-bool DeviceManager::activate_device(const std::string& id) {
+bool DeviceManager::activate_device(const std::string& name) {
     std::lock_guard<std::mutex> lock(m_lock);
-    if (m_active_devices.count(id)) return true;
+    if (m_active_devices.count(name)) return true;
     auto it = std::find_if(m_available_devices.begin(), m_available_devices.end(),
-                           [&id](const AudioDeviceInfo& info) { return info.id == id; });
+                           [&name](const AudioDeviceInfo& info) { return info.name == name; });
     if (it == m_available_devices.end()) return false;
     auto dev = std::make_shared<HardwareDevice>(*it);
     if (dev->init()) {
-        m_active_devices[id] = dev;
+        m_active_devices[name] = dev;
         return true;
     }
     return false;
 }
 
-void DeviceManager::deactivate_device(const std::string& id) {
+void DeviceManager::deactivate_device(const std::string& name) {
     std::lock_guard<std::mutex> lock(m_lock);
-    m_active_devices.erase(id);
+    m_active_devices.erase(name);
 }
 
 void DeviceManager::stop_all() {
