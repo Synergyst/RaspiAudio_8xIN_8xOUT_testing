@@ -11,7 +11,6 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
-#include <memory>
 
 std::atomic<bool> g_running(true);
 AudioMetrics g_metrics;
@@ -67,6 +66,8 @@ static bool parse_client_endpoint(const std::string& endpoint, bool source, std:
     return !key.empty();
 }
 
+// Note: The original data_callback is kept for the duplex device, 
+// but the DspEngine now handles the multi-device ALSA routing independently.
 void data_callback(ma_device*, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     if (!pOutput || !pInput || frameCount == 0) return;
     auto* in = static_cast<const float*>(pInput);
@@ -228,12 +229,13 @@ int main(int argc, char** argv) {
     g_deviceMgr.enumerate_devices();
     std::cout << "Detected " << g_deviceMgr.get_available_devices().size() << " audio devices." << std::endl;
 
+    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, g_deviceMgr, 8182, 8183, plainText);
+    if (!webServer.start()) return -1;
+
+    // Instantiate and start the DSP Engine
     g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr);
     g_dspEngine->start();
     std::cout << "DSP Engine started." << std::endl;
-
-    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, g_deviceMgr, *g_dspEngine, 8182, 8183, plainText);
-    if (!webServer.start()) return -1;
 
     ma_device_config config = ma_device_config_init(ma_device_type_duplex);
     config.capture.format = ma_format_f32;

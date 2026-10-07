@@ -385,8 +385,8 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
 }
 
 WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
-                     ClientManager& clientMgr, DeviceManager& deviceMgr, int httpPort, int wsPort, bool plainText)
-    : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr), m_deviceMgr(deviceMgr),
+                     ClientManager& clientMgr, DeviceManager& deviceMgr, DspEngine& dspEngine, int httpPort, int wsPort, bool plainText)
+    : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr), m_deviceMgr(deviceMgr), m_dspEngine(dspEngine),
       m_httpPort(httpPort), m_wsPort(wsPort), m_plainText(plainText) {}
 
 WebServer::~WebServer() { stop(); }

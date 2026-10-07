@@ -110,12 +110,13 @@ private:
 };
 
 class DeviceManager;
+class DspEngine;
 
 class WebServer {
 public:
     WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
-              ClientManager& clientMgr, DeviceManager& deviceMgr, int httpPort = 8182, int wsPort = 8183,
-              bool plainText = false);
+              ClientManager& clientMgr, DeviceManager& deviceMgr, DspEngine& dspEngine, 
+              int httpPort = 8182, int wsPort = 8183, bool plainText = false);
     ~WebServer();
     bool start();
     void stop();
@@ -126,6 +127,7 @@ private:
     ToneControls& m_tone;
     ClientManager& m_clientMgr;
     DeviceManager& m_deviceMgr;
+    DspEngine& m_dspEngine;
     int m_httpPort;
     int m_wsPort;
     bool m_plainText;

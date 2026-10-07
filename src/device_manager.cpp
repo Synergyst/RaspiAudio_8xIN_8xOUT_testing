@@ -2,11 +2,15 @@
 #include "constants.h"
 #include <iostream>
 #include <algorithm>
+#include <cstring>
 
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info) : m_info(info) {
-    // Use ma_pcm_rb frames (approx 100ms)
-    m_input_rb.init(ma_format_f32, m_info.channels, 4800);
-    m_output_rb.init(ma_format_f32, m_info.channels, 4800);
+    // Use a reasonable buffer size based on sample rate (approx 100ms)
+    ma_uint32 bufferFrames = m_info.sample_rate / 10; 
+    if (bufferFrames == 0) bufferFrames = 4800;
+
+    m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
+    m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
 }
 
 HardwareDevice::~HardwareDevice() {
@@ -73,36 +77,51 @@ void DeviceManager::enumerate_devices() {
     ma_context context;
     if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) return;
 
+    // List of virtual/plugin backends to ignore.
+    // We make this static so the non-capturing lambda can access it.
+    static const std::vector<std::string> virtual_backends = {
+        "null", "lavrate", "samplerate", "speexrate", "jack", 
+        "oss", "pulse", "speex", "upmix", "vdownmix"
+    };
+
+    // MUST be a non-capturing lambda to be convertible to a function pointer.
     auto enum_callback = [](ma_context* pContext, ma_device_type type, const ma_device_info* pDeviceInfo, void* pUserData) -> unsigned int {
         auto* manager = static_cast<DeviceManager*>(pUserData);
+        
+        // Extract the ALSA ID
+        std::string idStr = pDeviceInfo->id.alsa;
+        
+        // Filter out virtual devices using the static list
+        // We need to access the static list here.
+        // Since it's not captured, we can't use 'virtual_backends' directly if it were local.
+        // But since I'll define it as a static constant, it works.
+        // However, to be absolutely safe with lambdas and static vectors, 
+        // I'll just use a local static inside the lambda or a helper.
+        
+        // Actually, let's just use a simple check for the most common virtual IDs 
+        // or use a static const array for maximum compatibility.
+        
+        static const char* v_list[] = { "null", "lavrate", "samplerate", "speexrate", "jack", "oss", "pulse", "speex", "upmix", "vdownmix" };
+        for (const char* v : v_list) {
+            if (idStr == v) return 1;
+        }
+
         AudioDeviceInfo info;
-        
-        // MiniAudio's ma_device_info stores the ID in a fixed-size array/struct ma_device_id.
-        // We need to convert that to a string.
-        char idStr[64];
-        // We use the id member of ma_device_info. Since it's a struct, we might need a helper 
-        // or just a direct copy if it's a char array. 
-        // Based on the library, pDeviceInfo->id is the key.
-        
-        // Let's try to use a simple approach to get the ID and Name.
-        // If pDeviceInfo->name is available, use it.
-        info.name = pDeviceInfo->name ? pDeviceInfo->name : "unknown";
+        // pDeviceInfo->name is a char array, it is never NULL.
+        info.name = pDeviceInfo->name;
+        info.id = idStr;
         info.is_capture = (type == ma_device_type_capture);
         
-        // To get the ID as a string, we can use a temporary buffer or a specific MiniAudio helper.
-        // Since we don't want to guess the exact structure of ma_device_id, 
-        // let's use a simple identifier for now or a cast if we know it's a string.
-        // Actually, ma_device_info usually has a name and the id is used for init.
-        
-        // We'll use a dummy ID based on the pointer for now to ensure it compiles, 
-        // then refine it to use the actual ma_device_id.
-        info.id = std::to_string(reinterpret_cast<uintptr_t>(pDeviceInfo));
-        
-        info.sample_rate = 48000;
-        info.channels = CM5_MAX_CHANNELS;
+        if (pDeviceInfo->nativeDataFormatCount > 0) {
+            info.sample_rate = pDeviceInfo->nativeDataFormats[0].sampleRate;
+            info.channels = pDeviceInfo->nativeDataFormats[0].channels;
+        } else {
+            info.sample_rate = 48000;
+            info.channels = 2;
+        }
 
         manager->m_available_devices.push_back(info);
-        return 1; // Continue enumeration
+        return 1; 
     };
 
     if (ma_context_enumerate_devices(&context, enum_callback, this) != MA_SUCCESS) {
