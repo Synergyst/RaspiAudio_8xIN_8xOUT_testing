@@ -228,7 +228,7 @@ int main(int argc, char** argv) {
     g_deviceMgr.enumerate_devices();
     std::cout << "Detected " << g_deviceMgr.get_available_devices().size() << " audio devices." << std::endl;
 
-    g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr);
+    g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr, g_clientMgr);
     g_dspEngine->start();
     std::cout << "DSP Engine started." << std::endl;
 

@@ -1,4 +1,5 @@
 #include "web_server.h"
+#include "dsp_engine.h"
 #include "device_manager.h"
 #include <nlohmann/json.hpp>
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -538,6 +539,41 @@ bool WebServer::start() {
             } catch (const std::exception& error) {
                 response.status = 400;
                 response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
+            }
+        });
+
+        server->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& response) {
+            auto* gainProc = m_dspEngine.get_gain_processor();
+            auto* compProc = m_dspEngine.get_compressor();
+            nlohmann::json j;
+            j["gain"] = gainProc ? gainProc->get_gain() : 1.0f;
+            j["threshold"] = compProc ? compProc->get_threshold() : 0.5f;
+            j["ratio"] = compProc ? compProc->get_ratio() : 4.0f;
+            response.set_content(j.dump(2), "application/json");
+        });
+        server->Post("/api/dsp", [this](const httplib::Request& request, httplib::Response& response) {
+            try {
+                auto* gainProc = m_dspEngine.get_gain_processor();
+                auto* compProc = m_dspEngine.get_compressor();
+                if (request.has_param("gain")) {
+                    float g = query_float(request, "gain", -1.0f);
+                    if (g < 0.0f || !std::isfinite(g)) throw std::invalid_argument("gain must be >= 0");
+                    if (gainProc) gainProc->set_gain(g);
+                }
+                if (request.has_param("threshold")) {
+                    float t = query_float(request, "threshold", -1.0f);
+                    if (t < 0.0f || !std::isfinite(t)) throw std::invalid_argument("threshold must be >= 0");
+                    if (compProc) compProc->set_threshold(t);
+                }
+                if (request.has_param("ratio")) {
+                    float r = query_float(request, "ratio", -1.0f);
+                    if (r < 1.0f || !std::isfinite(r)) throw std::invalid_argument("ratio must be >= 1");
+                    if (compProc) compProc->set_ratio(r);
+                }
+                response.set_content("{\"status\":\"ok\"}", "application/json");
+            } catch (const std::exception& e) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
             }
         });
 

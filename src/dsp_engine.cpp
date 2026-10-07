@@ -1,12 +1,14 @@
 #include "dsp_engine.h"
+#include "web_server.h"
 #include <iostream>
 #include <chrono>
 #include <algorithm>
 #include <cmath>
 
-DspEngine::DspEngine(DeviceManager& deviceManager) : m_deviceManager(deviceManager) {
+DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager) 
+    : m_deviceManager(deviceManager), m_clientManager(clientManager) {
     // Pre-allocate mixing buffer (approx 100ms of stereo at 48kHz)
-    m_mixBuffer.resize(m_engineSampleRate * m_engineChannels / 10, 0.0f);
+    m_mixBuffer.resize(m_engineSampleRate * m_engineChannels, 0.0f);
 
     // Initialize default processor chain
     m_gainProc = std::make_unique<GainProcessor>(1.0f);
@@ -54,44 +56,60 @@ void DspEngine::process_audio() {
     auto activeDevices = m_deviceManager.get_active_devices();
     if (activeDevices.empty()) return;
 
-    std::fill(m_mixBuffer.begin(), m_mixBuffer.end(), 0.0f);
+    const auto routes = m_clientManager.route_snapshot();
+    if (!routes) return;
+
+    // Use 10ms frames (480 samples at 48kHz)
+    const size_t frames = 480;
+    const size_t totalSamples = frames * m_engineChannels;
+    std::vector<float> masterMix(totalSamples, 0.0f);
     
-    size_t totalSamplesProcessed = 0;
+    // 1. Capture Stage: Read from all active hardware capture devices into a temporary cache
+    // Since we have multiple devices, we'll sum them into a "virtual hardware capture" buffer
+    std::vector<float> hwCaptureCache(totalSamples, 0.0f);
     bool has_input = false;
 
-    // 1. SUMMING STAGE
     for (auto& dev : activeDevices) {
         if (dev->get_info().is_capture) {
             PcmRingBuffer& rb = dev->get_input_buffer();
-            size_t samplesToRead = 480 * m_engineChannels; 
-            std::vector<float> tempBuffer(samplesToRead);
-            
-            size_t read = rb.read(tempBuffer.data(), samplesToRead * sizeof(float));
+            std::vector<float> temp(totalSamples);
+            size_t read = rb.read(temp.data(), totalSamples * sizeof(float));
             if (read > 0) {
                 has_input = true;
                 size_t numSamples = read / sizeof(float);
-                for (size_t i = 0; i < numSamples && i < m_mixBuffer.size(); ++i) {
-                    m_mixBuffer[i] += tempBuffer[i];
+                for (size_t i = 0; i < numSamples; ++i) {
+                    hwCaptureCache[i] += temp[i];
                 }
-                totalSamplesProcessed = std::max(totalSamplesProcessed, numSamples);
             }
         }
     }
 
-    if (!has_input) return;
+    // 2. Routing Stage: Apply routes from hardware/capture to hardware/playback
+    bool routed_audio = false;
+    for (const auto& route : *routes) {
+        if (!route.enabled) continue;
+        if (route.source_endpoint == "hardware/capture" && route.destination_endpoint == "hardware/playback") {
+            if (route.source_channel >= m_engineChannels || route.destination_channel >= m_engineChannels) continue;
+            
+            for (size_t f = 0; f < frames; ++f) {
+                float sample = hwCaptureCache[f * m_engineChannels + route.source_channel];
+                masterMix[f * m_engineChannels + route.destination_channel] += sample * route.gain;
+            }
+            routed_audio = true;
+        }
+    }
 
-    // 2. DSP STAGE: Apply the processor chain to the mixed audio
-    // First: Gain
-    m_gainProc->process(m_mixBuffer.data(), totalSamplesProcessed / m_engineChannels, m_engineChannels);
-    
-    // Second: Compression
-    m_compProc->process(m_mixBuffer.data(), totalSamplesProcessed / m_engineChannels, m_engineChannels);
+    if (!routed_audio) return;
 
-    // 3. OUTPUT STAGE
+    // 3. DSP STAGE: Apply the processor chain to the routed mix
+    m_gainProc->process(masterMix.data(), frames, m_engineChannels);
+    m_compProc->process(masterMix.data(), frames, m_engineChannels);
+
+    // 4. Output Stage: Write to all active hardware playback devices
     for (auto& dev : activeDevices) {
         if (!dev->get_info().is_capture) {
             PcmRingBuffer& rb = dev->get_output_buffer();
-            rb.write(m_mixBuffer.data(), totalSamplesProcessed * sizeof(float));
+            rb.write(masterMix.data(), totalSamples * sizeof(float));
         }
     }
 }

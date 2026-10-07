@@ -9,6 +9,8 @@
 #include <memory>
 #include <cmath>
 
+class ClientManager; // Forward declaration
+
 // Base class for audio effects
 class AudioProcessor {
 public:
@@ -21,6 +23,7 @@ class GainProcessor : public AudioProcessor {
 public:
     GainProcessor(float gain = 1.0f) : m_gain(gain) {}
     void set_gain(float gain) { m_gain = gain; }
+    float get_gain() const { return m_gain; }
     void process(float* buffer, size_t frames, unsigned channels) override {
         for (size_t i = 0; i < frames * channels; ++i) {
             buffer[i] *= m_gain;
@@ -41,6 +44,8 @@ public:
 
     void set_threshold(float t) { m_threshold = t; }
     void set_ratio(float r) { m_ratio = r; }
+    float get_threshold() const { return m_threshold; }
+    float get_ratio() const { return m_ratio; }
 
     void process(float* buffer, size_t frames, unsigned channels) override {
         for (size_t i = 0; i < frames * channels; ++i) {
@@ -75,7 +80,7 @@ private:
 
 class DspEngine {
 public:
-    DspEngine(DeviceManager& deviceManager);
+    DspEngine(DeviceManager& deviceManager, ClientManager& clientManager);
     ~DspEngine();
 
     void start();
@@ -90,6 +95,7 @@ private:
     void process_audio();
 
     DeviceManager& m_deviceManager;
+    ClientManager& m_clientManager;
     std::thread m_workerThread;
     std::atomic<bool> m_running{false};
     
