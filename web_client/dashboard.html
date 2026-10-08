@@ -572,11 +572,13 @@
         setInterval(updateMeters, 100);
         
         async function init() {
-            // Load in parallel to prevent blocking the UI
-            await Promise.allSettled([
+            // Parallel non-blocking loading
+            Promise.allSettled([
                 loadDevices(),
                 loadGraph()
-            ]);
+            ]).then(() => {
+                if ($('status')) $('status').textContent = 'Ready';
+            });
         }
         init();
     </script>
