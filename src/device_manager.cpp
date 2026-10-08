@@ -3,6 +3,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info) : m_info(info) {
     ma_uint32 bufferFrames = m_info.sample_rate / 10; 
@@ -66,25 +67,35 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
     }
 }
 
-DeviceManager::DeviceManager() {}
-DeviceManager::~DeviceManager() { stop_all(); }
+DeviceManager::DeviceManager() {
+    if (ma_context_init(NULL, 0, NULL, &m_context) != MA_SUCCESS) {
+        std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
+    }
+}
+
+DeviceManager::~DeviceManager() { 
+    stop_all();
+    ma_context_uninit(&m_context);
+}
 
 void DeviceManager::enumerate_devices() {
     std::lock_guard<std::mutex> lock(m_lock);
     m_available_devices.clear();
-    ma_context context;
-    if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) return;
 
-    auto enum_callback = [](ma_context* pContext, ma_device_type type, const ma_device_info* pDeviceInfo, void* pUserData) -> unsigned int {
+    ma_context_enumerate_devices(&m_context, [](ma_context* pContext, ma_device_type type, const ma_device_info* pDeviceInfo, void* pUserData) -> unsigned int {
         auto* manager = static_cast<DeviceManager*>(pUserData);
-        static const char* v_list[] = { "null", "lavrate", "samplerate", "speexrate", "jack", "oss", "pulse", "speex", "upmix", "vdownmix" };
-        for (const char* v : v_list) {
-            if (std::string(pDeviceInfo->name) == v) return 1;
-        }
+        
+        static const std::set<std::string> v_list = {
+            "null", "lavrate", "samplerate", "speexrate", "jack", 
+            "oss", "pulse", "speex", "upmix", "vdownmix"
+        };
+        if (v_list.count(pDeviceInfo->id.alsa)) return 1;
+
         AudioDeviceInfo info;
         info.id = pDeviceInfo->id;
         info.name = pDeviceInfo->name;
         info.is_capture = (type == ma_device_type_capture);
+        
         if (pDeviceInfo->nativeDataFormatCount > 0) {
             info.sample_rate = pDeviceInfo->nativeDataFormats[0].sampleRate;
             info.channels = pDeviceInfo->nativeDataFormats[0].channels;
@@ -92,14 +103,10 @@ void DeviceManager::enumerate_devices() {
             info.sample_rate = 48000;
             info.channels = 2;
         }
+
         manager->m_available_devices.push_back(info);
         return 1; 
-    };
-
-    if (ma_context_enumerate_devices(&context, enum_callback, this) != MA_SUCCESS) {
-        std::cerr << "[DeviceManager] Failed to enumerate devices" << std::endl;
-    }
-    ma_context_uninit(&context);
+    }, this);
 }
 
 std::vector<AudioDeviceInfo> DeviceManager::get_available_devices() {
@@ -117,9 +124,12 @@ std::vector<std::shared_ptr<HardwareDevice>> DeviceManager::get_active_devices()
 bool DeviceManager::activate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
     if (m_active_devices.count(id)) return true;
+    
     auto it = std::find_if(m_available_devices.begin(), m_available_devices.end(),
-                           [&id](const AudioDeviceInfo& info) { return info.id.alsa == id; });
+                           [&id](const AudioDeviceInfo& info) { return std::string(info.id.alsa) == id; });
+    
     if (it == m_available_devices.end()) return false;
+    
     auto dev = std::make_shared<HardwareDevice>(*it);
     if (dev->init()) {
         m_active_devices[id] = dev;

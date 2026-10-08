@@ -47,12 +47,13 @@ public:
     void enumerate_devices();
     std::vector<AudioDeviceInfo> get_available_devices();
     std::vector<std::shared_ptr<HardwareDevice>> get_active_devices();
-    bool activate_device(const std::string& name);
-    void deactivate_device(const std::string& name);
+    bool activate_device(const std::string& id);
+    void deactivate_device(const std::string& id);
     void stop_all();
 
 private:
     std::mutex m_lock;
+    ma_context m_context;
     std::vector<AudioDeviceInfo> m_available_devices;
     std::unordered_map<std::string, std::shared_ptr<HardwareDevice>> m_active_devices;
 };
