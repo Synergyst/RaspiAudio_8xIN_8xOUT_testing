@@ -37,11 +37,21 @@ bool HardwareDevice::init() {
     config.dataCallback = HardwareDevice::data_callback;
     config.pUserData = this;
 
-    if (ma_device_init(NULL, &config, &m_device) != MA_SUCCESS) return false;
-    if (ma_device_start(&m_device) != MA_SUCCESS) {
-        ma_device_uninit(&m_device);
+    ma_context context;
+    if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) return false;
+
+    if (ma_device_init(&context, &config, &m_device) != MA_SUCCESS) {
+        ma_context_uninit(&context);
         return false;
     }
+
+    if (ma_device_start(&m_device) != MA_SUCCESS) {
+        ma_device_uninit(&m_device);
+        ma_context_uninit(&context);
+        return false;
+    }
+
+    ma_context_uninit(&context);
     return true;
 }
 
@@ -104,23 +114,23 @@ std::vector<std::shared_ptr<HardwareDevice>> DeviceManager::get_active_devices()
     return active;
 }
 
-bool DeviceManager::activate_device(const std::string& name) {
+bool DeviceManager::activate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
-    if (m_active_devices.count(name)) return true;
+    if (m_active_devices.count(id)) return true;
     auto it = std::find_if(m_available_devices.begin(), m_available_devices.end(),
-                           [&name](const AudioDeviceInfo& info) { return info.name == name; });
+                           [&id](const AudioDeviceInfo& info) { return info.id.alsa == id; });
     if (it == m_available_devices.end()) return false;
     auto dev = std::make_shared<HardwareDevice>(*it);
     if (dev->init()) {
-        m_active_devices[name] = dev;
+        m_active_devices[id] = dev;
         return true;
     }
     return false;
 }
 
-void DeviceManager::deactivate_device(const std::string& name) {
+void DeviceManager::deactivate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
-    m_active_devices.erase(name);
+    m_active_devices.erase(id);
 }
 
 void DeviceManager::stop_all() {
