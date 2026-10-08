@@ -226,9 +226,23 @@
             z-index: 999;
             display: none;
         }
+        #error-overlay {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--accent-red);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            z-index: 2000;
+            display: none;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
+    <div id="error-overlay"></div>
     <header>
         <div class="brand">CM5 AUDIO NETWORK PATCHBAY</div>
         <div class="toolbar">
@@ -314,16 +328,32 @@
             <button style="background: var(--accent-red)" onclick="deleteRoute()">DELETE</button>
         </div>
     </div>
+
     <script>
         const $ = id => document.getElementById(id);
         let graph = { endpoints: [], routes: [] };
         let activeSource = null;
         let editingRouteId = null;
 
+        function showError(msg) {
+            const el = $('error-overlay');
+            el.textContent = msg;
+            el.style.display = 'block';
+            setTimeout(() => { el.style.display = 'none'; }, 5000);
+        }
+
         async function fetchAPI(url, options = {}) {
-            const res = await fetch(url, options);
-            if (!res.ok) throw new Error(await res.text());
-            return res.json();
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
+            try {
+                const res = await fetch(url, { ...options, signal: controller.signal });
+                clearTimeout(timeout);
+                if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                return await res.json();
+            } catch (e) {
+                clearTimeout(timeout);
+                throw e;
+            }
         }
 
         async function loadDevices() {
@@ -344,6 +374,7 @@
                 `).join('') || 'No devices found';
             } catch (e) {
                 $('device-list').textContent = 'Error loading devices: ' + e.message;
+                showError('Failed to load hardware devices');
             }
         }
 
@@ -365,6 +396,7 @@
                 updateSysInfo();
             } catch (e) {
                 console.error('Graph load failed', e);
+                showError('Failed to load routing graph');
             }
         }
 
@@ -538,7 +570,14 @@
 
         window.onresize = drawCables;
         setInterval(updateMeters, 100);
-        async function init() { await loadDevices(); await loadGraph(); }
+        
+        async function init() {
+            // Load in parallel to prevent blocking the UI
+            await Promise.allSettled([
+                loadDevices(),
+                loadGraph()
+            ]);
+        }
         init();
     </script>
 </body>
