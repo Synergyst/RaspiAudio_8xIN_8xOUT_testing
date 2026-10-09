@@ -419,7 +419,6 @@
             
             const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
             
-            // Reconciliation: Remove old blocks
             [srcCont, destCont].forEach(cont => {
                 Array.from(cont.children).forEach(child => {
                     const id = child.id.replace('block-', '');
@@ -431,7 +430,6 @@
                 });
             });
 
-            // Reconciliation: Update or Add blocks
             graph.endpoints.forEach(ep => {
                 let block = $(`block-${ep.id}`);
                 if (!block) {
@@ -439,12 +437,10 @@
                     if (ep.direction === 'source') srcCont.appendChild(block);
                     else destCont.appendChild(block);
                 } else {
-                    // Just update header if name changed
                     block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
                 }
             });
             
-            // Use a small timeout to ensure DOM is updated before drawing cables
             setTimeout(drawCables, 50);
         }
 
@@ -554,32 +550,33 @@
         async function updateMeters() {
             try {
                 const data = await fetchAPI('/api/meters');
-                updateMeterGroup('capture', data.capture);
-                updateMeterGroup('playback', data.playback);
-                if (data.clients) {
-                    data.clients.forEach(client => {
-                        updateMeterGroup(`client-${client.id}-input`, client.input_meters);
-                        updateMeterGroup(`client-${client.id}-output`, client.output_meters);
-                    });
-                }
-            } catch (e) {}
-        }
-
-        function updateMeterGroup(groupId, meters) {
-            if (!meters) return;
-            meters.forEach((m, i) => {
-                let epId = groupId;
-                if (groupId === 'capture') epId = 'hardware/capture';
-                if (groupId === 'playback') epId = 'hardware/playback';
-                if (groupId.startsWith('client-')) {
-                    const parts = groupId.split('-');
-                    epId = `client/${parts[1]}/${parts[2]}`;
-                }
-                const fill = $(`vu-${epId}-${i}`);
-                const peak = $(`peak-${epId}-${i}`);
-                if (fill) fill.style.width = Math.max(0, Math.min(100, (m.rms_db + 60) * 100 / 60)) + '%';
-                if (peak) peak.classList.toggle('active', m.clipped);
-            });
+                
+                const allVuFills = document.querySelectorAll('.vu-fill');
+                
+                allVuFills.forEach(fill => {
+                    const id = fill.id; 
+                    const lastDash = id.lastIndexOf('-');
+                    if (lastDash === -1) return;
+                    
+                    const epId = id.substring(3, lastDash); // Remove "vu-" and everything after the last dash
+                    const chIdx = parseInt(id.substring(lastDash + 1));
+                    
+                    let meter = null;
+                    
+                    if (epId.includes('/capture')) {
+                        if (data.capture && data.capture[chIdx]) meter = data.capture[chIdx];
+                    } else if (epId.includes('/playback')) {
+                        if (data.playback && data.playback[chIdx]) meter = data.playback[chIdx];
+                    }
+                    
+                    if (meter) {
+                        const peakEl = document.getElementById(`peak-${epId}-${chIdx}`);
+                        const width = Math.max(0, Math.min(100, (meter.rms_db + 60) * 100 / 60)) + '%';
+                        fill.style.width = width;
+                        if (peakEl) peakEl.classList.toggle('active', meter.clipped);
+                    }
+                });
+            } catch (e) { console.error("Meter update error:", e); }
         }
 
         async function applyTone() {
