@@ -143,14 +143,6 @@ void WebClientSession::stop_sender() {
 
 ClientManager::ClientManager()
     : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
-    std::vector<AudioRoute> defaults;
-    for (unsigned channel = 0; channel < CM5_MAX_CHANNELS; ++channel) {
-        defaults.push_back(AudioRoute{
-            m_next_route_id.fetch_add(1), "hardware/capture", channel,
-            "hardware/playback", channel, 1.0f, true
-        });
-    }
-    m_routes = std::make_shared<const std::vector<AudioRoute>>(std::move(defaults));
 }
 
 std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, const std::string& remoteIp) {
@@ -331,25 +323,12 @@ std::vector<AudioRoute> ClientManager::get_routes() const {
 bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) const {
     if (source && endpoint == "tone/generator") return true;
 
-    // Handle hardware endpoints: hardware/[id]/capture or hardware/[id]/playback
     if (endpoint.compare(0, 9, "hardware/") == 0) {
         const std::string suffix = source ? "/capture" : "/playback";
         if (endpoint.size() < 10 + suffix.size() || endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
-        
-        const std::string id = endpoint.substr(9, endpoint.size() - 9 - suffix.size());
-        if (id.empty()) return false;
-        if (m_deviceManager) {
-            const auto active = m_deviceManager->get_active_devices();
-            for (const auto& dev : active) {
-                if (dev->get_info().id.alsa == id) {
-                    if (dev->get_info().is_capture == source) return true;
-                }
-            }
-        }
-        return false;
+        return true; // Validate format only; activation is handled by DspEngine
     }
 
-    // Handle client endpoints: client/[id]/capture or client/[id]/playback
     const std::string prefix = "client/";
     const std::string suffix = source ? "/capture" : "/playback";
     if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 ||

@@ -35,13 +35,16 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Starting CM5 Audio Network Patchbay..." << std::endl;
-    g_clientMgr.load_settings(g_controls, g_tone);
-    g_clientMgr.set_device_manager(&g_deviceMgr);
-
+    
+    // FIX: Initialize DeviceManager and link to ClientManager FIRST
     g_deviceMgr.enumerate_devices();
+    g_clientMgr.set_device_manager(&g_deviceMgr);
+    
+    // FIX: Load settings AFTER the manager is linked, so endpoint validation can work
+    g_clientMgr.load_settings(g_controls, g_tone);
+
     std::cout << "Detected " << g_deviceMgr.get_available_devices().size() << " devices." << std::endl;
 
-    // PASS g_metrics to the DspEngine so it can update VU meters
     g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr, g_clientMgr, g_metrics);
     g_dspEngine->start();
 

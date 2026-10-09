@@ -89,8 +89,9 @@ void DspEngine::process_audio() {
             std::vector<float> buf(samplesNeeded, 0.0f);
             size_t read = dev->get_input_buffer().read(buf.data(), samplesNeeded * sizeof(float));
             if (read > 0) {
-                captureCaches[info.name] = { std::vector<float>(buf), info.channels };
-                update_meters(captureCaches[info.name].buffer, info.channels, true);
+                // KEY FIX: Use ALSA ID instead of Name to match WebServer IDs
+                captureCaches[info.id.alsa] = { std::move(buf), info.channels };
+                update_meters(captureCaches[info.id.alsa].buffer, info.channels, true);
             }
         }
     }
@@ -100,7 +101,7 @@ void DspEngine::process_audio() {
     for (auto& dev : activeDevices) {
         if (!dev->get_info().is_capture) {
             const auto& info = dev->get_info();
-            playbackBuffers[info.name] = { std::vector<float>(frames * info.channels, 0.0f), info.channels };
+            playbackBuffers[info.id.alsa] = { std::vector<float>(frames * info.channels, 0.0f), info.channels };
         }
     }
 
@@ -110,15 +111,14 @@ void DspEngine::process_audio() {
         unsigned srcStride = 0;
         bool srcFound = false;
 
-        if (route.source_endpoint == "hardware/capture" && !captureCaches.empty()) {
-            auto it = captureCaches.begin();
-            if (route.source_channel < it->second.channels) {
-                srcData = it->second.buffer.data(); srcStride = it->second.channels; srcFound = true;
-            }
-        } else if (route.source_endpoint.compare(0, 17, "hardware/capture/") == 0) {
-            std::string name = route.source_endpoint.substr(17);
-            if (captureCaches.count(name)) {
-                const auto& cache = captureCaches[name];
+        // Handle hardware capture endpoints: hardware/[id]/capture
+        if (route.source_endpoint.compare(0, 9, "hardware/") == 0 && route.source_endpoint.find("/capture") != std::string::npos) {
+            size_t start = 9;
+            size_t end = route.source_endpoint.find("/capture");
+            std::string id = route.source_endpoint.substr(start, end - start);
+            
+            if (captureCaches.count(id)) {
+                const auto& cache = captureCaches[id];
                 if (route.source_channel < cache.channels) {
                     srcData = cache.buffer.data(); srcStride = cache.channels; srcFound = true;
                 }
@@ -127,18 +127,14 @@ void DspEngine::process_audio() {
 
         if (!srcFound) continue;
 
-        if (route.destination_endpoint == "hardware/playback") {
-            for (auto& pbPair : playbackBuffers) {
-                auto& pb = pbPair.second;
-                if (route.destination_channel < pb.channels) {
-                    for (size_t f = 0; f < frames; ++f) 
-                        pb.buffer[f * pb.channels + route.destination_channel] += srcData[f * srcStride + route.source_channel] * route.gain;
-                }
-            }
-        } else if (route.destination_endpoint.compare(0, 18, "hardware/playback/") == 0) {
-            std::string name = route.destination_endpoint.substr(18);
-            if (playbackBuffers.count(name)) {
-                auto& pb = playbackBuffers[name];
+        // Handle hardware playback endpoints: hardware/[id]/playback
+        if (route.destination_endpoint.compare(0, 9, "hardware/") == 0 && route.destination_endpoint.find("/playback") != std::string::npos) {
+            size_t start = 9;
+            size_t end = route.destination_endpoint.find("/playback");
+            std::string id = route.destination_endpoint.substr(start, end - start);
+            
+            if (playbackBuffers.count(id)) {
+                auto& pb = playbackBuffers[id];
                 if (route.destination_channel < pb.channels) {
                     for (size_t f = 0; f < frames; ++f)
                         pb.buffer[f * pb.channels + route.destination_channel] += srcData[f * srcStride + route.source_channel] * route.gain;
@@ -149,7 +145,7 @@ void DspEngine::process_audio() {
 
     for (auto& dev : activeDevices) {
         if (!dev->get_info().is_capture) {
-            auto it = playbackBuffers.find(dev->get_info().name);
+            auto it = playbackBuffers.find(dev->get_info().id.alsa);
             if (it == playbackBuffers.end()) continue;
             auto& pb = it->second;
             m_gainProc->process(pb.buffer.data(), frames, pb.channels);
