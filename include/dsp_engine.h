@@ -2,6 +2,7 @@
 #define DSP_ENGINE_H
 
 #include "device_manager.h"
+#include "web_server.h"
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -80,7 +81,7 @@ private:
 
 class DspEngine {
 public:
-    DspEngine(DeviceManager& deviceManager, ClientManager& clientManager);
+    DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics);
     ~DspEngine();
 
     void start();
@@ -93,9 +94,11 @@ public:
 private:
     void processing_loop();
     void process_audio();
+    void update_meters(const std::vector<float>& buffer, unsigned channels, bool isCapture);
 
     DeviceManager& m_deviceManager;
     ClientManager& m_clientManager;
+    AudioMetrics& m_metrics;
     std::thread m_workerThread;
     std::atomic<bool> m_running{false};
     

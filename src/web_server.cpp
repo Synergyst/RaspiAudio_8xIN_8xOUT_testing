@@ -329,8 +329,27 @@ std::vector<AudioRoute> ClientManager::get_routes() const {
 }
 
 bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) const {
-    if (source && (endpoint == "hardware/capture" || endpoint == "tone/generator")) return true;
-    if (!source && endpoint == "hardware/playback") return true;
+    if (source && endpoint == "tone/generator") return true;
+
+    // Handle hardware endpoints: hardware/[id]/capture or hardware/[id]/playback
+    if (endpoint.compare(0, 9, "hardware/") == 0) {
+        const std::string suffix = source ? "/capture" : "/playback";
+        if (endpoint.size() < 10 + suffix.size() || endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+        
+        const std::string id = endpoint.substr(9, endpoint.size() - 9 - suffix.size());
+        if (id.empty()) return false;
+        if (m_deviceManager) {
+            const auto active = m_deviceManager->get_active_devices();
+            for (const auto& dev : active) {
+                if (dev->get_info().id.alsa == id) {
+                    if (dev->get_info().is_capture == source) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Handle client endpoints: client/[id]/capture or client/[id]/playback
     const std::string prefix = "client/";
     const std::string suffix = source ? "/capture" : "/playback";
     if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 ||
@@ -490,7 +509,6 @@ bool WebServer::start() {
             response.set_content(j.dump(2), "application/json");
         });
 
-        // NEW: Device Activation/Deactivation Endpoints
         server->Post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
             const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
             if (id.empty()) {

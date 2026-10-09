@@ -41,7 +41,8 @@ int main(int argc, char** argv) {
     g_deviceMgr.enumerate_devices();
     std::cout << "Detected " << g_deviceMgr.get_available_devices().size() << " devices." << std::endl;
 
-    g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr, g_clientMgr);
+    // PASS g_metrics to the DspEngine so it can update VU meters
+    g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr, g_clientMgr, g_metrics);
     g_dspEngine->start();
 
     WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, g_deviceMgr, *g_dspEngine, 8182, 8183, plainText);

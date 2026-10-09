@@ -6,8 +6,8 @@
 #include <cmath>
 #include <unordered_map>
 
-DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager) 
-    : m_deviceManager(deviceManager), m_clientManager(clientManager) {
+DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics) 
+    : m_deviceManager(deviceManager), m_clientManager(clientManager), m_metrics(metrics) {
     m_mixBuffer.resize(m_engineSampleRate * m_engineChannels, 0.0f);
     m_gainProc = std::make_unique<GainProcessor>(1.0f);
     m_compProc = std::make_unique<CompressorProcessor>(0.7f, 4.0f);
@@ -24,6 +24,41 @@ void DspEngine::start() {
 void DspEngine::stop() {
     m_running = false;
     if (m_workerThread.joinable()) m_workerThread.join();
+}
+
+void DspEngine::update_meters(const std::vector<float>& buffer, unsigned channels, bool isCapture) {
+    if (buffer.empty()) return;
+    
+    size_t frames = buffer.size() / channels;
+    for (unsigned ch = 0; ch < std::min(channels, (unsigned)CM5_MAX_CHANNELS); ++ch) {
+        float sumSq = 0.0f;
+        float peak = 0.0f;
+        
+        for (size_t f = 0; f < frames; ++f) {
+            float sample = buffer[f * channels + ch];
+            float absS = std::abs(sample);
+            sumSq += sample * sample;
+            if (absS > peak) peak = absS;
+        }
+        
+        float rms = std::sqrt(sumSq / frames);
+        float rmsDb = (rms > 0.00001f) ? 20.0f * std::log10(rms) : -60.0f;
+        float peakDb = (peak > 0.00001f) ? 20.0f * std::log10(peak) : -60.0f;
+
+        if (isCapture) {
+            m_metrics.capture[ch].raw_value.store(rms, std::memory_order_relaxed);
+            m_metrics.capture[ch].raw_peak.store(peak, std::memory_order_relaxed);
+            m_metrics.capture[ch].rms_db.store(rmsDb, std::memory_order_relaxed);
+            m_metrics.capture[ch].peak_db.store(peakDb, std::memory_order_relaxed);
+            m_metrics.capture[ch].clipped.store(peak > 1.0f, std::memory_order_relaxed);
+        } else {
+            m_metrics.playback[ch].raw_value.store(rms, std::memory_order_relaxed);
+            m_metrics.playback[ch].raw_peak.store(peak, std::memory_order_relaxed);
+            m_metrics.playback[ch].rms_db.store(rmsDb, std::memory_order_relaxed);
+            m_metrics.playback[ch].peak_db.store(peakDb, std::memory_order_relaxed);
+            m_metrics.playback[ch].clipped.store(peak > 1.0f, std::memory_order_relaxed);
+        }
+    }
 }
 
 void DspEngine::processing_loop() {
@@ -53,7 +88,10 @@ void DspEngine::process_audio() {
             size_t samplesNeeded = frames * info.channels;
             std::vector<float> buf(samplesNeeded, 0.0f);
             size_t read = dev->get_input_buffer().read(buf.data(), samplesNeeded * sizeof(float));
-            if (read > 0) captureCaches[info.name] = { std::move(buf), info.channels };
+            if (read > 0) {
+                captureCaches[info.name] = { std::vector<float>(buf), info.channels };
+                update_meters(captureCaches[info.name].buffer, info.channels, true);
+            }
         }
     }
 
@@ -116,6 +154,7 @@ void DspEngine::process_audio() {
             auto& pb = it->second;
             m_gainProc->process(pb.buffer.data(), frames, pb.channels);
             m_compProc->process(pb.buffer.data(), frames, pb.channels);
+            update_meters(pb.buffer, pb.channels, false);
             dev->get_output_buffer().write(pb.buffer.data(), pb.buffer.size() * sizeof(float));
         }
     }

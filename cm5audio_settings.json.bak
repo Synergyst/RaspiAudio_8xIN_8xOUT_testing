@@ -1,0 +1,174 @@
+{
+  "clients": {
+    "02df8c39-0457-4565-9a6f-e1b4a577d4eb": "dragonos",
+    "4a61f25c-7c9a-4351-8d56-e4c3cdb429e5": "s25fe"
+  },
+  "hardware": {
+    "capture": [
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      }
+    ],
+    "playback": [
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      },
+      {
+        "gain": 1.0,
+        "mute": false
+      }
+    ]
+  },
+  "routes": [
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 0,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 1,
+      "source": "hardware/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 1,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 2,
+      "source": "hardware/capture",
+      "source_channel": 1
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 2,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 3,
+      "source": "hardware/capture",
+      "source_channel": 2
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 3,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 4,
+      "source": "hardware/capture",
+      "source_channel": 3
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 4,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 5,
+      "source": "hardware/capture",
+      "source_channel": 4
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 5,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 6,
+      "source": "hardware/capture",
+      "source_channel": 5
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 6,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 7,
+      "source": "hardware/capture",
+      "source_channel": 6
+    },
+    {
+      "destination": "hardware/playback",
+      "destination_channel": 7,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 8,
+      "source": "hardware/capture",
+      "source_channel": 7
+    },
+    {
+      "destination": "hardware/:2,0/playback",
+      "destination_channel": 0,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 10,
+      "source": "hardware/:1,0/capture",
+      "source_channel": 0
+    },
+    {
+      "destination": "hardware/:2,0/playback",
+      "destination_channel": 1,
+      "enabled": true,
+      "gain": 1.0,
+      "id": 11,
+      "source": "hardware/:1,0/capture",
+      "source_channel": 1
+    }
+  ],
+  "tone": {
+    "amplitude": 0.20000000298023224,
+    "enabled": true,
+    "frequency_hz": 440.0
+  },
+  "version": 1
+}
