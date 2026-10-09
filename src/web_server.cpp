@@ -352,7 +352,20 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
     if (!endpoint_exists(route.source_endpoint, true) || !endpoint_exists(route.destination_endpoint, false)) {
         error = "source or destination endpoint is unavailable"; return false;
     }
+    
     auto routes = *std::atomic_load(&m_routes);
+    
+    // PREVENT DUPLICATE ROUTES
+    for (const auto& existing : routes) {
+        if (existing.source_endpoint == route.source_endpoint &&
+            existing.source_channel == route.source_channel &&
+            existing.destination_endpoint == route.destination_endpoint &&
+            existing.destination_channel == route.destination_channel) {
+            error = "This routing connection already exists";
+            return false;
+        }
+    }
+
     route.id = assignedId = m_next_route_id.fetch_add(1);
     routes.push_back(std::move(route));
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
