@@ -5,7 +5,8 @@
 #include <cstring>
 #include <set>
 
-HardwareDevice::HardwareDevice(const AudioDeviceInfo& info) : m_info(info) {
+HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context) 
+    : m_info(info), m_context(context) {
     ma_uint32 bufferFrames = m_info.sample_rate / 10; 
     if (bufferFrames == 0) bufferFrames = 4800;
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
@@ -38,21 +39,14 @@ bool HardwareDevice::init() {
     config.dataCallback = HardwareDevice::data_callback;
     config.pUserData = this;
 
-    ma_context context;
-    if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) return false;
+    if (m_context == nullptr) return false;
 
-    if (ma_device_init(&context, &config, &m_device) != MA_SUCCESS) {
-        ma_context_uninit(&context);
-        return false;
-    }
-
+    if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) return false;
     if (ma_device_start(&m_device) != MA_SUCCESS) {
         ma_device_uninit(&m_device);
-        ma_context_uninit(&context);
         return false;
     }
 
-    ma_context_uninit(&context);
     return true;
 }
 
@@ -96,13 +90,16 @@ void DeviceManager::enumerate_devices() {
         info.name = pDeviceInfo->name;
         info.is_capture = (type == ma_device_type_capture);
         
-        if (pDeviceInfo->nativeDataFormatCount > 0) {
-            info.sample_rate = pDeviceInfo->nativeDataFormats[0].sampleRate;
-            info.channels = pDeviceInfo->nativeDataFormats[0].channels;
-        } else {
-            info.sample_rate = 48000;
-            info.channels = 2;
+        unsigned maxChannels = 0;
+        ma_uint32 bestSampleRate = 48000;
+        for (unsigned i = 0; i < pDeviceInfo->nativeDataFormatCount; ++i) {
+            if (pDeviceInfo->nativeDataFormats[i].channels > maxChannels) {
+                maxChannels = pDeviceInfo->nativeDataFormats[i].channels;
+                bestSampleRate = pDeviceInfo->nativeDataFormats[i].sampleRate;
+            }
         }
+        info.channels = (maxChannels > 0) ? maxChannels : 2;
+        info.sample_rate = bestSampleRate;
 
         manager->m_available_devices.push_back(info);
         return 1; 
@@ -117,30 +114,41 @@ std::vector<AudioDeviceInfo> DeviceManager::get_available_devices() {
 std::vector<std::shared_ptr<HardwareDevice>> DeviceManager::get_active_devices() {
     std::lock_guard<std::mutex> lock(m_lock);
     std::vector<std::shared_ptr<HardwareDevice>> active;
-    for (auto const& [id, dev] : m_active_devices) active.push_back(dev);
+    for (auto const& [key, dev] : m_active_devices) active.push_back(dev);
     return active;
 }
 
 bool DeviceManager::activate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
-    if (m_active_devices.count(id)) return true;
+    bool anyActivated = false;
     
-    auto it = std::find_if(m_available_devices.begin(), m_available_devices.end(),
-                           [&id](const AudioDeviceInfo& info) { return std::string(info.id.alsa) == id; });
-    
-    if (it == m_available_devices.end()) return false;
-    
-    auto dev = std::make_shared<HardwareDevice>(*it);
-    if (dev->init()) {
-        m_active_devices[id] = dev;
-        return true;
+    // Loop through all available devices and activate EVERY entry matching this ID
+    // (This handles duplex devices by activating both capture and playback)
+    for (const auto& info : m_available_devices) {
+        if (std::string(info.id.alsa) == id) {
+            std::string uniqueKey = id + (info.is_capture ? "_capture" : "_playback");
+            if (m_active_devices.count(uniqueKey)) continue;
+            
+            auto dev = std::make_shared<HardwareDevice>(info, &m_context);
+            if (dev->init()) {
+                m_active_devices[uniqueKey] = dev;
+                anyActivated = true;
+            }
+        }
     }
-    return false;
+    return anyActivated;
 }
 
 void DeviceManager::deactivate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
-    m_active_devices.erase(id);
+    // Remove all entries matching this ID (both capture and playback)
+    for (auto it = m_active_devices.begin(); it != m_active_devices.end(); ) {
+        if (it->first.find(id) == 0) {
+            it = m_active_devices.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void DeviceManager::stop_all() {

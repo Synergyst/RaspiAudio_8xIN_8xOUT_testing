@@ -20,7 +20,7 @@ struct AudioDeviceInfo {
 
 class HardwareDevice {
 public:
-    HardwareDevice(const AudioDeviceInfo& info);
+    HardwareDevice(const AudioDeviceInfo& info, ma_context* context);
     ~HardwareDevice();
 
     bool init();
@@ -34,6 +34,7 @@ private:
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 
     AudioDeviceInfo m_info;
+    ma_context* m_context;
     ma_device m_device;
     PcmRingBuffer m_input_rb;
     PcmRingBuffer m_output_rb;
@@ -55,6 +56,7 @@ private:
     std::mutex m_lock;
     ma_context m_context;
     std::vector<AudioDeviceInfo> m_available_devices;
+    // Key is now "ID_capture" or "ID_playback" to support duplex devices
     std::unordered_map<std::string, std::shared_ptr<HardwareDevice>> m_active_devices;
 };
 

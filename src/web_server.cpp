@@ -489,6 +489,34 @@ bool WebServer::start() {
             }
             response.set_content(j.dump(2), "application/json");
         });
+
+        // NEW: Device Activation/Deactivation Endpoints
+        server->Post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
+            const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
+            if (id.empty()) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"id parameter is required\"}", "application/json");
+                return;
+            }
+            if (m_deviceMgr.activate_device(id)) {
+                response.set_content("{\"status\":\"ok\"}", "application/json");
+            } else {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"failed to activate device\"}", "application/json");
+            }
+        });
+
+        server->Post("/api/devices/deactivate", [this](const httplib::Request& request, httplib::Response& response) {
+            const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
+            if (id.empty()) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"id parameter is required\"}", "application/json");
+                return;
+            }
+            m_deviceMgr.deactivate_device(id);
+            response.set_content("{\"status\":\"ok\"}", "application/json");
+        });
+
         server->Get("/api/meters", meters);
         server->Get("/api/metrics", meters);
         server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {

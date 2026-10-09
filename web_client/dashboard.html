@@ -131,6 +131,7 @@
             flex-direction: column;
             gap: 30px;
             z-index: 5;
+            transition: all 0.3s ease;
         }
         .endpoint-block {
             background: var(--panel-bg);
@@ -139,6 +140,12 @@
             padding: 10px;
             width: 220px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, border-color 0.2s;
+            animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes popIn {
+            from { opacity: 0; transform: scale(0.8) translateY(20px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
         }
         .endpoint-block.active-block { border-color: var(--accent-blue); }
         .endpoint-header {
@@ -343,10 +350,11 @@
         }
 
         async function fetchAPI(url, options = {}) {
+            const absoluteUrl = url.startsWith('/') ? url : '/' + url;
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
             try {
-                const res = await fetch(url, { ...options, signal: controller.signal });
+                const res = await fetch(absoluteUrl, { ...options, signal: controller.signal });
                 clearTimeout(timeout);
                 if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
                 return await res.json();
@@ -408,14 +416,36 @@
         function renderPatchbay() {
             const srcCont = $('sources');
             const destCont = $('destinations');
-            srcCont.innerHTML = '';
-            destCont.innerHTML = '';
-            graph.endpoints.forEach(ep => {
-                const block = createEndpointBlock(ep);
-                if (ep.direction === 'source') srcCont.appendChild(block);
-                else destCont.appendChild(block);
+            
+            const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
+            
+            // Reconciliation: Remove old blocks
+            [srcCont, destCont].forEach(cont => {
+                Array.from(cont.children).forEach(child => {
+                    const id = child.id.replace('block-', '');
+                    if (!currentEndpoints.has(id)) {
+                        child.style.opacity = '0';
+                        child.style.transform = 'scale(0.8)';
+                        setTimeout(() => child.remove(), 300);
+                    }
+                });
             });
-            drawCables();
+
+            // Reconciliation: Update or Add blocks
+            graph.endpoints.forEach(ep => {
+                let block = $(`block-${ep.id}`);
+                if (!block) {
+                    block = createEndpointBlock(ep);
+                    if (ep.direction === 'source') srcCont.appendChild(block);
+                    else destCont.appendChild(block);
+                } else {
+                    // Just update header if name changed
+                    block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
+                }
+            });
+            
+            // Use a small timeout to ensure DOM is updated before drawing cables
+            setTimeout(drawCables, 50);
         }
 
         function createEndpointBlock(ep) {
@@ -572,7 +602,6 @@
         setInterval(updateMeters, 100);
         
         async function init() {
-            // Parallel non-blocking loading
             Promise.allSettled([
                 loadDevices(),
                 loadGraph()
