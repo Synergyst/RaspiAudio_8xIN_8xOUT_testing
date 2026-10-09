@@ -41,7 +41,11 @@ bool HardwareDevice::init() {
 
     if (m_context == nullptr) return false;
 
-    if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) return false;
+    if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) {
+        std::cerr << "[HardwareDevice] Init failed for " << m_info.name << " (" << m_info.channels << "ch)" << std::endl;
+        return false;
+    }
+
     if (ma_device_start(&m_device) != MA_SUCCESS) {
         ma_device_uninit(&m_device);
         return false;
@@ -76,6 +80,8 @@ void DeviceManager::enumerate_devices() {
     std::lock_guard<std::mutex> lock(m_lock);
     m_available_devices.clear();
 
+    std::cout << "[DeviceManager] Enumerating ALSA Hardware..." << std::endl;
+
     ma_context_enumerate_devices(&m_context, [](ma_context* pContext, ma_device_type type, const ma_device_info* pDeviceInfo, void* pUserData) -> unsigned int {
         auto* manager = static_cast<DeviceManager*>(pUserData);
         
@@ -90,17 +96,32 @@ void DeviceManager::enumerate_devices() {
         info.name = pDeviceInfo->name;
         info.is_capture = (type == ma_device_type_capture);
         
+        // LOGGING: Let's see what's actually happening with the native formats
+        std::cout << "  - Found " << (type == ma_device_type_capture ? "Input" : "Output") 
+                  << ": " << pDeviceInfo->name << " [" << pDeviceInfo->id.alsa << "]" << std::endl;
+        std::cout << "    Native Formats Count: " << pDeviceInfo->nativeDataFormatCount << std::endl;
+
         unsigned maxChannels = 0;
         ma_uint32 bestSampleRate = 48000;
         for (unsigned i = 0; i < pDeviceInfo->nativeDataFormatCount; ++i) {
+            std::cout << "    Format[" << i << "]: " << pDeviceInfo->nativeDataFormats[i].channels << "ch, " 
+                      << pDeviceInfo->nativeDataFormats[i].sampleRate << "Hz" << std::endl;
             if (pDeviceInfo->nativeDataFormats[i].channels > maxChannels) {
                 maxChannels = pDeviceInfo->nativeDataFormats[i].channels;
                 bestSampleRate = pDeviceInfo->nativeDataFormats[i].sampleRate;
             }
         }
+        
         info.channels = (maxChannels > 0) ? maxChannels : 2;
         info.sample_rate = bestSampleRate;
 
+        // SMART FALLBACK: If it's a DAC8x and we only found 2 channels, force 8.
+        if (info.channels < 8 && (info.name.find("8x") != std::string::npos || info.name.find("DAC8") != std::string::npos)) {
+            std::cout << "    [SENSING] Device name suggests 8-channel hardware. Overriding 2ch -> 8ch." << std::endl;
+            info.channels = 8;
+        }
+
+        std::cout << "    Final Assigned: " << info.channels << "ch @ " << info.sample_rate << "Hz" << std::endl;
         manager->m_available_devices.push_back(info);
         return 1; 
     }, this);
@@ -122,8 +143,6 @@ bool DeviceManager::activate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
     bool anyActivated = false;
     
-    // Loop through all available devices and activate EVERY entry matching this ID
-    // (This handles duplex devices by activating both capture and playback)
     for (const auto& info : m_available_devices) {
         if (std::string(info.id.alsa) == id) {
             std::string uniqueKey = id + (info.is_capture ? "_capture" : "_playback");
@@ -141,7 +160,6 @@ bool DeviceManager::activate_device(const std::string& id) {
 
 void DeviceManager::deactivate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
-    // Remove all entries matching this ID (both capture and playback)
     for (auto it = m_active_devices.begin(); it != m_active_devices.end(); ) {
         if (it->first.find(id) == 0) {
             it = m_active_devices.erase(it);
