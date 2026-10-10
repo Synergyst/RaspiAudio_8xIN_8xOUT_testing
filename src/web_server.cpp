@@ -52,15 +52,6 @@ bool query_bool(const httplib::Request& request, const char* name, bool fallback
     return value == "1" || value == "true" || value == "on";
 }
 
-bool read_json_uint(const std::string& text, const char* key, unsigned& value) {
-    try {
-        const auto object = nlohmann::json::parse(text);
-        if (!object.contains(key) || !object[key].is_number_unsigned()) return false;
-        value = object[key].get<unsigned>();
-        return true;
-    } catch (...) { return false; }
-}
-
 bool parse_identity_message(const std::string& text, std::string& key, std::string& name,
                             unsigned& inputChannels, unsigned& outputChannels) {
     try {
@@ -145,6 +136,16 @@ ClientManager::ClientManager()
     : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
 }
 
+void ClientManager::update_activated_device(const std::string& id, bool active) {
+    std::lock_guard<std::mutex> lock(m_lock);
+    auto it = std::find(m_activatedDevices.begin(), m_activatedDevices.end(), id);
+    if (active && it == m_activatedDevices.end()) {
+        m_activatedDevices.push_back(id);
+    } else if (!active && it != m_activatedDevices.end()) {
+        m_activatedDevices.erase(it);
+    }
+}
+
 std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, const std::string& remoteIp) {
     std::lock_guard<std::mutex> lock(m_lock);
     auto session = std::make_shared<WebClientSession>();
@@ -203,30 +204,46 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
     if (!file) return false;
     try {
         const auto settings = nlohmann::json::parse(file);
+        
         if (settings.contains("tone") && settings["tone"].is_object()) {
             const auto& value = settings["tone"];
             tone.enabled.store(value.value("enabled", false), std::memory_order_relaxed);
             tone.frequency_hz.store(std::clamp(value.value("frequency_hz", 440.0f), 1.0f, 20000.0f), std::memory_order_relaxed);
             tone.amplitude.store(std::clamp(value.value("amplitude", 0.2f), 0.0f, 1.0f), std::memory_order_relaxed);
         }
+
         if (settings.contains("hardware") && settings["hardware"].is_object()) {
             const auto& hardware = settings["hardware"];
             for (const char* type : {"capture", "playback"}) {
                 if (!hardware.contains(type) || !hardware[type].is_array()) continue;
                 const auto& array = hardware[type];
-                for (unsigned i = 0; i < array.size(); ++i) {
-                    // We store these as generic indices in the JSON, but we map them to a default endpoint for now
-                    // This part might need further refinement to store specific ID controls
-                    std::string endpointId = (std::string(type) == "capture") ? "hardware/default/capture" : "hardware/default/playback";
-                    auto& bank = (std::string(type) == "capture") ? controls.capture[endpointId] : controls.playback[endpointId];
-                    
-                    // Note: JSON format was a flat array. We map it to channel indices.
-                    unsigned ch = i % CM5_MAX_CHANNELS;
-                    bank[ch].gain.store(std::clamp(array[i].value("gain", 1.0f), 0.0f, 8.0f), std::memory_order_relaxed);
-                    bank[ch].mute.store(array[i].value("mute", false), std::memory_order_relaxed);
+                for (const auto& item : array) {
+                    if (!item.contains("endpoint")) continue;
+                    std::string epId = item["endpoint"];
+                    auto& bank = (std::string(type) == "capture") ? controls.capture[epId] : controls.playback[epId];
+                    unsigned ch = item.value("channel", 0u);
+                    if (ch < CM5_MAX_CHANNELS) {
+                        bank[ch].gain.store(std::clamp(item.value("gain", 1.0f), 0.0f, 8.0f), std::memory_order_relaxed);
+                        bank[ch].mute.store(item.value("mute", false), std::memory_order_relaxed);
+                    }
                 }
             }
         }
+
+        {
+            std::lock_guard<std::mutex> lock(m_lock);
+            m_activatedDevices.clear();
+            if (settings.contains("activated_devices") && settings["activated_devices"].is_array()) {
+                for (const auto& id_val : settings["activated_devices"]) {
+                    if (id_val.is_string()) {
+                        std::string id = id_val.get<std::string>();
+                        m_activatedDevices.push_back(id);
+                        if (m_deviceManager) m_deviceManager->activate_device(id);
+                    }
+                }
+            }
+        }
+
         {
             std::lock_guard<std::mutex> routeLock(m_route_lock);
             std::lock_guard<std::mutex> sessionLock(m_lock);
@@ -294,6 +311,15 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
                 {"gain", bank[i].gain.load(std::memory_order_relaxed)},
                 {"mute", bank[i].mute.load(std::memory_order_relaxed)}
             });
+        }
+    }
+    
+    {
+        auto* mutableThis = const_cast<ClientManager*>(this);
+        std::lock_guard<std::mutex> lock(mutableThis->m_lock);
+        settings["activated_devices"] = nlohmann::json::array();
+        for (const auto& id : mutableThis->m_activatedDevices) {
+            settings["activated_devices"].push_back(id);
         }
     }
     
@@ -538,6 +564,8 @@ bool WebServer::start() {
                 return;
             }
             if (m_deviceMgr.activate_device(id)) {
+                m_clientMgr.update_activated_device(id, true);
+                m_clientMgr.save_settings(m_controls, m_tone);
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } else {
                 response.status = 400;
@@ -553,6 +581,8 @@ bool WebServer::start() {
                 return;
             }
             m_deviceMgr.deactivate_device(id);
+            m_clientMgr.update_activated_device(id, false);
+            m_clientMgr.save_settings(m_controls, m_tone);
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
 

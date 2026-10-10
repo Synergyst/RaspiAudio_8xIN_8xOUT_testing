@@ -102,6 +102,7 @@ public:
     bool add_route(AudioRoute route, uint32_t& assignedId, std::string& error);
     bool remove_route(uint32_t routeId);
     bool update_route(uint32_t routeId, float gain, bool enabled);
+    void update_activated_device(const std::string& id, bool active);
 
 private:
     bool endpoint_exists(const std::string& endpoint, bool source) const;
@@ -110,6 +111,7 @@ private:
     mutable std::mutex m_route_lock;
     std::shared_ptr<const std::vector<AudioRoute>> m_routes;
     std::unordered_map<std::string, std::string> m_known_client_names;
+    std::vector<std::string> m_activatedDevices;
     std::atomic<uint32_t> m_next_route_id{1};
     DeviceManager* m_deviceManager = nullptr;
 };
