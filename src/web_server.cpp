@@ -213,10 +213,17 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
             const auto& hardware = settings["hardware"];
             for (const char* type : {"capture", "playback"}) {
                 if (!hardware.contains(type) || !hardware[type].is_array()) continue;
-                auto& bank = std::string(type) == "capture" ? controls.capture : controls.playback;
-                for (unsigned i = 0; i < CM5_MAX_CHANNELS && i < hardware[type].size(); ++i) {
-                    bank[i].gain.store(std::clamp(hardware[type][i].value("gain", 1.0f), 0.0f, 8.0f), std::memory_order_relaxed);
-                    bank[i].mute.store(hardware[type][i].value("mute", false), std::memory_order_relaxed);
+                const auto& array = hardware[type];
+                for (unsigned i = 0; i < array.size(); ++i) {
+                    // We store these as generic indices in the JSON, but we map them to a default endpoint for now
+                    // This part might need further refinement to store specific ID controls
+                    std::string endpointId = (std::string(type) == "capture") ? "hardware/default/capture" : "hardware/default/playback";
+                    auto& bank = (std::string(type) == "capture") ? controls.capture[endpointId] : controls.playback[endpointId];
+                    
+                    // Note: JSON format was a flat array. We map it to channel indices.
+                    unsigned ch = i % CM5_MAX_CHANNELS;
+                    bank[ch].gain.store(std::clamp(array[i].value("gain", 1.0f), 0.0f, 8.0f), std::memory_order_relaxed);
+                    bank[ch].mute.store(array[i].value("mute", false), std::memory_order_relaxed);
                 }
             }
         }
@@ -267,15 +274,29 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
         {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)},
         {"amplitude", tone.amplitude.load(std::memory_order_relaxed)}
     };
-    for (const auto* type : {"capture", "playback"}) {
-        const auto& bank = std::string(type) == "capture" ? controls.capture : controls.playback;
-        settings["hardware"][type] = nlohmann::json::array();
-        for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i)
-            settings["hardware"][type].push_back({
+    
+    settings["hardware"]["capture"] = nlohmann::json::array();
+    for (auto const& [id, bank] : controls.capture) {
+        for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+            settings["hardware"]["capture"].push_back({
+                {"endpoint", id}, {"channel", i},
                 {"gain", bank[i].gain.load(std::memory_order_relaxed)},
                 {"mute", bank[i].mute.load(std::memory_order_relaxed)}
             });
+        }
     }
+
+    settings["hardware"]["playback"] = nlohmann::json::array();
+    for (auto const& [id, bank] : controls.playback) {
+        for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+            settings["hardware"]["playback"].push_back({
+                {"endpoint", id}, {"channel", i},
+                {"gain", bank[i].gain.load(std::memory_order_relaxed)},
+                {"mute", bank[i].mute.load(std::memory_order_relaxed)}
+            });
+        }
+    }
+    
     {
         std::lock_guard<std::mutex> routeLock(m_route_lock);
         std::lock_guard<std::mutex> sessionLock(m_lock);
@@ -326,7 +347,7 @@ bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) co
     if (endpoint.compare(0, 9, "hardware/") == 0) {
         const std::string suffix = source ? "/capture" : "/playback";
         if (endpoint.size() < 10 + suffix.size() || endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
-        return true; // Validate format only; activation is handled by DspEngine
+        return true; 
     }
 
     const std::string prefix = "client/";
@@ -355,7 +376,6 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
     
     auto routes = *std::atomic_load(&m_routes);
     
-    // PREVENT DUPLICATE ROUTES
     for (const auto& existing : routes) {
         if (existing.source_endpoint == route.source_endpoint &&
             existing.source_channel == route.source_channel &&
@@ -457,33 +477,42 @@ bool WebServer::start() {
         });
 
         auto meters = [this](const httplib::Request&, httplib::Response& response) {
-            std::ostringstream json;
-            json << "{\"capture\":[";
-            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.capture[i];
-                json << "{\"ch\":" << i
-                     << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
-                     << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
-                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
-                     << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+            nlohmann::json j;
+            j["capture"] = nlohmann::json::object();
+            for (auto const& [id, meters_array] : m_metrics.capture) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                    const auto& m = meters_array[i];
+                    arr.push_back({
+                        {"ch", i},
+                        {"raw_value", m.raw_value.load(std::memory_order_relaxed)},
+                        {"raw_peak", m.raw_peak.load(std::memory_order_relaxed)},
+                        {"rms_db", m.rms_db.load(std::memory_order_relaxed)},
+                        {"peak_db", m.peak_db.load(std::memory_order_relaxed)},
+                        {"peak_hold_db", m.peak_hold_db.load(std::memory_order_relaxed)},
+                        {"clipped", m.clipped.load(std::memory_order_relaxed)}
+                    });
+                }
+                j["capture"][id] = arr;
             }
-            json << "],\"playback\":[";
-            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.playback[i];
-                json << "{\"ch\":" << i
-                     << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
-                     << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
-                     << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
-                     << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+            j["playback"] = nlohmann::json::object();
+            for (auto const& [id, meters_array] : m_metrics.playback) {
+                nlohmann::json arr = nlohmann::json::array();
+                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                    const auto& m = meters_array[i];
+                    arr.push_back({
+                        {"ch", i},
+                        {"raw_value", m.raw_value.load(std::memory_order_relaxed)},
+                        {"raw_peak", m.raw_peak.load(std::memory_order_relaxed)},
+                        {"rms_db", m.rms_db.load(std::memory_order_relaxed)},
+                        {"peak_db", m.peak_db.load(std::memory_order_relaxed)},
+                        {"peak_hold_db", m.peak_hold_db.load(std::memory_order_relaxed)},
+                        {"clipped", m.clipped.load(std::memory_order_relaxed)}
+                    });
+                }
+                j["playback"][id] = arr;
             }
-            json << "]}";
-            response.set_content(json.str(), "application/json");
+            response.set_content(j.dump(2), "application/json");
         };
         server->Get("/api/devices", [this](const httplib::Request&, httplib::Response& response) {
             m_deviceMgr.enumerate_devices();
@@ -531,23 +560,37 @@ bool WebServer::start() {
         server->Get("/api/metrics", meters);
         server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;
-            json << "{\"capture\":[";
-            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.capture[i];
-                json << "{\"ch\":" << i
-                     << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+            json << "{\"capture\":{";
+            bool first = true;
+            for (auto const& [id, meters_array] : m_metrics.capture) {
+                if (!first) json << ",";
+                json << "\"" << id << "\":[";
+                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                    const auto& meter = meters_array[i];
+                    json << "{\"ch\":" << i
+                         << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
+                         << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+                         << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                }
+                json << "]";
+                first = false;
             }
-            json << "],\"playback\":[";
-            for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                const auto& meter = m_metrics.playback[i];
-                json << "{\"ch\":" << i
-                     << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                     << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                     << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+            json << "},\"playback\":{";
+            first = true;
+            for (auto const& [id, meters_array] : m_metrics.playback) {
+                if (!first) json << ",";
+                json << "\"" << id << "\":[";
+                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                    const auto& meter = meters_array[i];
+                    json << "{\"ch\":" << i
+                         << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
+                         << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
+                         << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                }
+                json << "]";
+                first = false;
             }
-            json << "]}";
+            json << "}}";
             response.set_content(json.str(), "application/json");
         });
 
@@ -726,31 +769,39 @@ bool WebServer::start() {
 
         server->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
             try {
+                const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
                 const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
                 const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
-                if ((type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid channel");
-                auto& control = type == "playback" ? m_controls.playback[channel] : m_controls.capture[channel];
+                if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
+                
+                auto& bank = (type == "playback") ? m_controls.playback[endpoint] : m_controls.capture[endpoint];
                 if (request.has_param("gain")) {
                     const float gain = std::stof(request.get_param_value("gain"));
                     if (!std::isfinite(gain) || gain < 0.0f || gain > 8.0f) throw std::invalid_argument("invalid gain");
-                    control.gain.store(gain);
+                    bank[channel].gain.store(gain);
                 }
-                if (request.has_param("mute")) control.mute.store(request.get_param_value("mute") == "1");
+                if (request.has_param("mute")) bank[channel].mute.store(request.get_param_value("mute") == "1");
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }
         });
         server->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
             try {
-                if (request.has_param("all")) for (unsigned i = 0; i < 8; ++i) {
-                    m_metrics.capture[i].clipped.store(false); m_metrics.capture[i].peak_hold_db.store(-60.0f);
-                    m_metrics.playback[i].clipped.store(false); m_metrics.playback[i].peak_hold_db.store(-60.0f);
+                if (request.has_param("all")) {
+                    for (auto& [id, bank] : m_metrics.capture) {
+                        for (auto& m : bank) { m.clipped.store(false); m.peak_hold_db.store(-60.0f); }
+                    }
+                    for (auto& [id, bank] : m_metrics.playback) {
+                        for (auto& m : bank) { m.clipped.store(false); m.peak_hold_db.store(-60.0f); }
+                    }
                 }
                 else {
+                    const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
                     const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
                     const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
-                    if ((type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid channel");
-                    auto& meter = type == "playback" ? m_metrics.playback[channel] : m_metrics.capture[channel];
-                    meter.clipped.store(false); meter.peak_hold_db.store(-60.0f);
+                    if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
+                    
+                    auto& bank = (type == "playback") ? m_metrics.playback[endpoint] : m_metrics.capture[endpoint];
+                    bank[channel].clipped.store(false); bank[channel].peak_hold_db.store(-60.0f);
                 }
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }

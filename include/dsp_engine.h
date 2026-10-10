@@ -9,6 +9,7 @@
 #include <mutex>
 #include <memory>
 #include <cmath>
+#include <string>
 
 class ClientManager; // Forward declaration
 
@@ -94,7 +95,7 @@ public:
 private:
     void processing_loop();
     void process_audio();
-    void update_meters(const std::vector<float>& buffer, unsigned channels, bool isCapture);
+    void update_meters(const std::vector<float>& buffer, unsigned channels, const std::string& endpointId, bool isCapture);
 
     DeviceManager& m_deviceManager;
     ClientManager& m_clientManager;

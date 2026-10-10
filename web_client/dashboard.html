@@ -558,15 +558,19 @@
                     const lastDash = id.lastIndexOf('-');
                     if (lastDash === -1) return;
                     
-                    const epId = id.substring(3, lastDash); // Remove "vu-" and everything after the last dash
+                    const epId = id.substring(3, lastDash); 
                     const chIdx = parseInt(id.substring(lastDash + 1));
                     
                     let meter = null;
                     
                     if (epId.includes('/capture')) {
-                        if (data.capture && data.capture[chIdx]) meter = data.capture[chIdx];
+                        if (data.capture && data.capture[epId] && data.capture[epId][chIdx]) {
+                            meter = data.capture[epId][chIdx];
+                        }
                     } else if (epId.includes('/playback')) {
-                        if (data.playback && data.playback[chIdx]) meter = data.playback[chIdx];
+                        if (data.playback && data.playback[epId] && data.playback[epId][chIdx]) {
+                            meter = data.playback[epId][chIdx];
+                        }
                     }
                     
                     if (meter) {

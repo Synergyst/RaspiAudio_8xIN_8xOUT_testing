@@ -31,13 +31,13 @@ struct ChannelControl {
 };
 
 struct AudioMetrics {
-    std::array<ChannelMeter, CM5_MAX_CHANNELS> capture;
-    std::array<ChannelMeter, CM5_MAX_CHANNELS> playback;
+    std::unordered_map<std::string, std::array<ChannelMeter, CM5_MAX_CHANNELS>> capture;
+    std::unordered_map<std::string, std::array<ChannelMeter, CM5_MAX_CHANNELS>> playback;
 };
 
 struct AudioControls {
-    std::array<ChannelControl, CM5_MAX_CHANNELS> capture;
-    std::array<ChannelControl, CM5_MAX_CHANNELS> playback;
+    std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CHANNELS>> capture;
+    std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CHANNELS>> playback;
 };
 
 struct ToneControls {
