@@ -82,7 +82,7 @@ private:
 
 class DspEngine {
 public:
-    DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics);
+    DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone);
     ~DspEngine();
 
     void start();
@@ -100,6 +100,7 @@ private:
     DeviceManager& m_deviceManager;
     ClientManager& m_clientManager;
     AudioMetrics& m_metrics;
+    ToneControls& m_tone;
     std::thread m_workerThread;
     std::atomic<bool> m_running{false};
     
@@ -111,6 +112,7 @@ private:
     
     ma_uint32 m_engineSampleRate = 48000;
     ma_uint32 m_engineChannels = 2;
+    double m_tonePhase = 0.0;
 };
 
 #endif
