@@ -209,7 +209,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
             const auto& value = settings["tone"];
             tone.enabled.store(value.value("enabled", false), std::memory_order_relaxed);
             tone.frequency_hz.store(std::clamp(value.value("frequency_hz", 440.0f), 1.0f, 20000.0f), std::memory_order_relaxed);
-            tone.amplitude.store(std::clamp(value.value("amplitude", 0.2f), 0.0f, 1.0f), std::memory_order_relaxed);
+            tone.amplitude.store(std::clamp(value.value("amplitude", 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
         }
 
         if (settings.contains("hardware") && settings["hardware"].is_object()) {
@@ -287,9 +287,9 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     nlohmann::json settings;
     settings["version"] = 1;
     settings["tone"] = {
-        {"enabled", tone.enabled.load(std::memory_order_relaxed)},
-        {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)},
-        {"amplitude", tone.amplitude.load(std::memory_order_relaxed)}
+        {{"enabled", tone.enabled.load(std::memory_order_relaxed)}},
+        {{"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)}},
+        {{"amplitude", tone.amplitude.load(std::memory_order_relaxed)}}
     };
     
     settings["hardware"]["capture"] = nlohmann::json::array();
@@ -335,7 +335,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             });
         }
         settings["clients"] = nlohmann::json::object();
-        for (const auto& client : m_known_client_names) settings["clients"][client.first] = client.second;
+        for (auto const& client : m_known_client_names) settings["clients"][client.first] = client.second;
         for (const auto& session : m_sessions) {
             const std::string key = session->get_client_key();
             if (!key.empty()) settings["clients"][key] = session->get_client_name();
@@ -344,7 +344,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     try {
         std::ofstream file(temporaryPath, std::ios::trunc);
         if (!file) return false;
-        file << settings.dump(2) << '\n';
+        file << settings.dump(2) << "\n";
         file.close();
         return std::rename(temporaryPath.c_str(), path.c_str()) == 0;
     } catch (...) {
@@ -455,17 +455,17 @@ bool WebServer::start() {
     const bool tlsEnabled = !m_plainText && std::ifstream(certPath).good() && std::ifstream(keyPath).good();
 
     m_httpThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
-        std::unique_ptr<httplib::Server> server;
         if (tlsEnabled) {
             auto ssl = std::make_unique<httplib::SSLServer>(certPath.c_str(), keyPath.c_str());
             if (!ssl->is_valid()) { std::cerr << "[HTTP] Invalid TLS certificate/key" << std::endl; m_running = false; return; }
-            server = std::move(ssl);
+            m_httpServer = std::move(ssl);
         } else {
             std::cerr << (m_plainText ? "[HTTP] Plain HTTP enabled" : "[HTTP] TLS certificate/key not found; serving plain HTTP") << std::endl;
-            server = std::make_unique<httplib::Server>();
+            m_httpServer = std::make_unique<httplib::Server>();
         }
-        server->set_mount_point("/client", "./web_client");
-        server->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& response) {
+        
+        m_httpServer->set_mount_point("/client", "./web_client");
+        m_httpServer->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& response) {
             std::ifstream certificate(certPath, std::ios::in | std::ios::binary);
             if (!certificate) {
                 response.status = 404;
@@ -477,7 +477,7 @@ bool WebServer::start() {
             response.set_header("Content-Disposition", "attachment; filename=server.crt");
             response.set_content(contents.str(), "application/x-x509-ca-cert");
         });
-        server->Get("/server.key", [keyPath](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/server.key", [keyPath](const httplib::Request&, httplib::Response& response) {
             std::ifstream privateKey(keyPath, std::ios::in | std::ios::binary);
             if (!privateKey) {
                 response.status = 404;
@@ -489,7 +489,7 @@ bool WebServer::start() {
             response.set_header("Content-Disposition", "attachment; filename=server.key");
             response.set_content(contents.str(), "application/x-pem-file");
         });
-        server->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& response) {
             std::ifstream bundle(p12Path, std::ios::in | std::ios::binary);
             if (!bundle) {
                 response.status = 404;
@@ -516,7 +516,7 @@ bool WebServer::start() {
                         {"rms_db", m.rms_db.load(std::memory_order_relaxed)},
                         {"peak_db", m.peak_db.load(std::memory_order_relaxed)},
                         {"peak_hold_db", m.peak_hold_db.load(std::memory_order_relaxed)},
-                        {"clipped", m.clipped.load(std::memory_order_relaxed)}
+                        {"clipped", m.clipped.load(std::memory_order_relaxed) ? "true" : "false"}
                     });
                 }
                 j["capture"][id] = arr;
@@ -533,14 +533,14 @@ bool WebServer::start() {
                         {"rms_db", m.rms_db.load(std::memory_order_relaxed)},
                         {"peak_db", m.peak_db.load(std::memory_order_relaxed)},
                         {"peak_hold_db", m.peak_hold_db.load(std::memory_order_relaxed)},
-                        {"clipped", m.clipped.load(std::memory_order_relaxed)}
+                        {"clipped", m.clipped.load(std::memory_order_relaxed) ? "true" : "false"}
                     });
                 }
                 j["playback"][id] = arr;
             }
             response.set_content(j.dump(2), "application/json");
         };
-        server->Get("/api/devices", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/api/devices", [this](const httplib::Request&, httplib::Response& response) {
             m_deviceMgr.enumerate_devices();
             const auto devices = m_deviceMgr.get_available_devices();
             nlohmann::json j = nlohmann::json::array();
@@ -556,7 +556,7 @@ bool WebServer::start() {
             response.set_content(j.dump(2), "application/json");
         });
 
-        server->Post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
             const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
             if (id.empty()) {
                 response.status = 400;
@@ -573,7 +573,7 @@ bool WebServer::start() {
             }
         });
 
-        server->Post("/api/devices/deactivate", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/devices/deactivate", [this](const httplib::Request& request, httplib::Response& response) {
             const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
             if (id.empty()) {
                 response.status = 400;
@@ -586,9 +586,9 @@ bool WebServer::start() {
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
-        server->Get("/api/meters", meters);
-        server->Get("/api/metrics", meters);
-        server->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/api/meters", meters);
+        m_httpServer->Get("/api/metrics", meters);
+        m_httpServer->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;
             json << "{\"capture\":{";
             bool first = true;
@@ -624,14 +624,14 @@ bool WebServer::start() {
             response.set_content(json.str(), "application/json");
         });
 
-        server->Get("/api/tone", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/api/tone", [this](const httplib::Request&, httplib::Response& response) {
             std::ostringstream json;
             json << "{\"enabled\":" << (m_tone.enabled.load() ? "true" : "false")
                  << ",\"frequency_hz\":" << m_tone.frequency_hz.load()
                  << ",\"amplitude\":" << m_tone.amplitude.load() << '}';
             response.set_content(json.str(), "application/json");
         });
-        server->Post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 if (request.has_param("enabled")) m_tone.enabled.store(query_bool(request, "enabled", false));
                 if (request.has_param("frequency")) {
@@ -651,7 +651,7 @@ bool WebServer::start() {
             }
         });
 
-        server->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& response) {
             auto* gainProc = m_dspEngine.get_gain_processor();
             auto* compProc = m_dspEngine.get_compressor();
             nlohmann::json j;
@@ -660,7 +660,7 @@ bool WebServer::start() {
             j["ratio"] = compProc ? compProc->get_ratio() : 4.0f;
             response.set_content(j.dump(2), "application/json");
         });
-        server->Post("/api/dsp", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/dsp", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 auto* gainProc = m_dspEngine.get_gain_processor();
                 auto* compProc = m_dspEngine.get_compressor();
@@ -686,7 +686,7 @@ bool WebServer::start() {
             }
         });
 
-        server->Get("/api/clients", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/api/clients", [this](const httplib::Request&, httplib::Response& response) {
             const auto sessions = m_clientMgr.get_active_sessions();
             std::ostringstream json;
             json << "{\"clients\":[";
@@ -707,7 +707,7 @@ bool WebServer::start() {
             response.set_content(json.str(), "application/json");
         });
 
-        server->Get("/api/graph", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Get("/api/graph", [this](const httplib::Request&, httplib::Response& response) {
             nlohmann::json j;
             j["revision"] = 1;
             
@@ -758,7 +758,7 @@ bool WebServer::start() {
             response.set_content(j.dump(2), "application/json");
         });
 
-        server->Post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
             AudioRoute route;
             route.source_endpoint = request.has_param("source") ? request.get_param_value("source") : "";
             route.destination_endpoint = request.has_param("destination") ? request.get_param_value("destination") : "";
@@ -774,14 +774,14 @@ bool WebServer::start() {
             }
             response.set_content("{\"status\":\"ok\",\"id\":" + std::to_string(id) + "}", "application/json");
         });
-        server->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
             const uint32_t id = query_uint(request, "id", 0);
             uint32_t routeId = id;
             if (request.matches.size() > 1) { try { routeId = static_cast<uint32_t>(std::stoul(request.matches[1])); } catch (...) {} }
             if (!m_clientMgr.remove_route(routeId)) { response.status = 404; response.set_content("{\"status\":\"error\"}", "application/json"); return; }
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
-        server->Post("/api/routes/update", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/routes/update", [this](const httplib::Request& request, httplib::Response& response) {
             const uint32_t id = query_uint(request, "id", 0);
             if (!id || !m_clientMgr.update_route(id, query_float(request, "gain", 1.0f), query_bool(request, "enabled", true))) {
                 response.status = 400; response.set_content("{\"status\":\"error\"}", "application/json"); return;
@@ -789,7 +789,7 @@ bool WebServer::start() {
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
-        server->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
+        m_httpServer->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
             if (!m_clientMgr.save_settings(m_controls, m_tone)) {
                 response.status = 500; response.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
                 return;
@@ -797,7 +797,7 @@ bool WebServer::start() {
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
-        server->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
                 const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
@@ -814,7 +814,7 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }
         });
-        server->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
+        m_httpServer->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 if (request.has_param("all")) {
                     for (auto& [id, bank] : m_metrics.capture) {
@@ -836,21 +836,21 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }
         });
-        server->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html; charset=UTF-8"); });
+        m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html; charset=UTF-8"); });
         std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://" << "0.0.0.0:" << m_httpPort << std::endl;
-        server->listen("0.0.0.0", m_httpPort);
+        m_httpServer->listen("0.0.0.0", m_httpPort);
     });
 
     m_wsThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
-        ix::WebSocketServer server(m_wsPort, "0.0.0.0");
+        m_wsServer = std::make_unique<ix::WebSocketServer>(m_wsPort, "0.0.0.0");
         if (m_plainText) std::cerr << "[WS] Plain WS enabled" << std::endl;
         if (tlsEnabled) {
             ix::SocketTLSOptions tls;
             tls.certFile = certPath; tls.keyFile = keyPath; tls.caFile = "NONE"; tls.tls = true;
-            server.setTLSOptions(tls);
+            m_wsServer->setTLSOptions(tls);
         }
         static std::atomic<uint32_t> nextId{1};
-        server.setOnConnectionCallback([this](std::weak_ptr<ix::WebSocket> weakSocket, std::shared_ptr<ix::ConnectionState> state) {
+        m_wsServer->setOnConnectionCallback([this](std::weak_ptr<ix::WebSocket> weakSocket, std::shared_ptr<ix::ConnectionState> state) {
             auto socket = weakSocket.lock();
             if (!socket) return;
             const uint32_t id = nextId.fetch_add(1);
@@ -878,17 +878,21 @@ bool WebServer::start() {
                 }
             });
         });
-        const auto result = server.listen();
+        const auto result = m_wsServer->listen();
         if (!result.first) { std::cerr << "[WS] Failed to listen on port " << m_wsPort << ": " << result.second << std::endl; return; }
-        server.start();
+        m_wsServer->start();
         while (m_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        server.stop();
+        m_wsServer->stop();
     });
     return true;
 }
 
 void WebServer::stop() {
     if (!m_running.exchange(false)) return;
-    if (m_httpThread.joinable()) m_httpThread.detach();
+    
+    if (m_httpServer) m_httpServer->stop();
+    if (m_wsServer) m_wsServer->stop();
+    
+    if (m_httpThread.joinable()) m_httpThread.join();
     if (m_wsThread.joinable()) m_wsThread.join();
 }

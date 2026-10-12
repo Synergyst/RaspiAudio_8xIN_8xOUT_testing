@@ -14,7 +14,8 @@
 #include "ring_buffer.h"
 #include "constants.h"
 
-namespace ix { class WebSocket; }
+namespace ix { class WebSocket; class WebSocketServer; }
+namespace httplib { class Server; class SSLServer; }
 
 struct ChannelMeter {
     std::atomic<float> raw_value{0.0f};
@@ -136,6 +137,10 @@ private:
     int m_wsPort;
     bool m_plainText;
     std::atomic<bool> m_running{false};
+    
+    std::unique_ptr<httplib::Server> m_httpServer;
+    std::unique_ptr<ix::WebSocketServer> m_wsServer;
+    
     std::thread m_httpThread;
     std::thread m_wsThread;
 };
