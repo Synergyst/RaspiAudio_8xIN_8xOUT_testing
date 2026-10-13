@@ -35,7 +35,7 @@ bool HardwareDevice::init() {
         config.playback.pDeviceID = &m_info.id;
     }
 
-    config.sampleRate = m_info.sample_rate;
+    config.sampleRate = 48000; 
     config.dataCallback = HardwareDevice::data_callback;
     config.pUserData = this;
 
@@ -143,11 +143,20 @@ bool DeviceManager::activate_device(const std::string& id) {
     std::lock_guard<std::mutex> lock(m_lock);
     bool anyActivated = false;
     
-    for (const auto& info : m_available_devices) {
-        if (std::string(info.id.alsa) == id) {
-            std::string uniqueKey = id + (info.is_capture ? "_capture" : "_playback");
+    for (const auto& baseInfo : m_available_devices) {
+        if (std::string(baseInfo.id.alsa) == id) {
+            std::string uniqueKey = id + (baseInfo.is_capture ? "_capture" : "_playback");
             if (m_active_devices.count(uniqueKey)) continue;
             
+            AudioDeviceInfo info = baseInfo;
+
+            // OVERRIDE: Use the virtual device from asound.conf for HiFiBerry Playback to enable 8-ch softvol/plug
+            std::string alsaId = info.id.alsa;
+            if (!info.is_capture && (alsaId.find("hifiberry") != std::string::npos || info.name.find("HiFiBerry") != std::string::npos)) {
+                std::cout << "[DeviceManager] Routing HiFiBerry Playback through virtual device 'dac8x' (asound.conf)" << std::endl;
+                std::strncpy(info.id.alsa, "dac8x", sizeof(info.id.alsa) - 1);
+            }
+
             auto dev = std::make_shared<HardwareDevice>(info, &m_context);
             if (dev->init()) {
                 m_active_devices[uniqueKey] = dev;
