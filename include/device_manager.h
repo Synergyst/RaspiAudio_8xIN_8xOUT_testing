@@ -10,6 +10,9 @@
 #include <mutex>
 #include <unordered_map>
 
+// Forward declaration of NodeId from web_server.h
+using NodeId = int32_t;
+
 struct AudioDeviceInfo {
     ma_device_id id;
     std::string name;
@@ -29,6 +32,9 @@ public:
     const AudioDeviceInfo& get_info() const { return m_info; }
     PcmRingBuffer& get_input_buffer() { return m_input_rb; }
     PcmRingBuffer& get_output_buffer() { return m_output_rb; }
+
+    // Node ID tracking for zero-allocation routing
+    NodeId node_id = -1;
 
 private:
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);

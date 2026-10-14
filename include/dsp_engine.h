@@ -11,7 +11,7 @@
 #include <cmath>
 #include <string>
 
-class ClientManager; // Forward declaration
+class ClientManager;
 
 // Base class for audio effects
 class AudioProcessor {
@@ -53,18 +53,13 @@ public:
         for (size_t i = 0; i < frames * channels; ++i) {
             float input = buffer[i];
             float absInput = std::abs(input);
-            
-            // Calculate target gain based on threshold and ratio
             float targetGain = 1.0f;
             if (absInput > m_threshold) {
                 targetGain = m_threshold + (absInput - m_threshold) / m_ratio;
                 targetGain /= absInput;
             }
-
-            // Smooth the gain change (Attack/Release)
             float coef = (targetGain < m_envelope) ? m_attackCoef : m_releaseCoef;
             m_envelope = coef * m_envelope + (1.0f - coef) * targetGain;
-            
             buffer[i] *= m_envelope;
         }
     }
@@ -72,11 +67,7 @@ public:
 private:
     std::atomic<float> m_threshold;
     std::atomic<float> m_ratio;
-    float m_attack;
-    float m_release;
-    float m_sampleRate;
-    float m_attackCoef;
-    float m_releaseCoef;
+    float m_attack, m_release, m_sampleRate, m_attackCoef, m_releaseCoef;
     float m_envelope = 1.0f;
 };
 
@@ -87,15 +78,16 @@ public:
 
     void start();
     void stop();
+    void mark_graph_dirty() { m_graphDirty.store(true, std::memory_order_release); }
 
-    // Accessors for the processor chain
     GainProcessor* get_gain_processor() { return m_gainProc.get(); }
     CompressorProcessor* get_compressor() { return m_compProc.get(); }
 
 private:
     void processing_loop();
     void process_audio();
-    void update_meters(const std::vector<float>& buffer, unsigned channels, const std::string& endpointId, bool isCapture);
+    void rebuild_graph();
+    void update_meters(float* buffer, unsigned channels, const std::string& endpointId, bool isCapture);
 
     DeviceManager& m_deviceManager;
     ClientManager& m_clientManager;
@@ -104,15 +96,29 @@ private:
     std::thread m_workerThread;
     std::atomic<bool> m_running{false};
     
-    std::vector<float> m_mixBuffer;
+    // Real-time Hardening State
+    static constexpr size_t MAX_NODES = 256;
+    static constexpr size_t BUFFER_FRAMES = 480;
+    static constexpr size_t INTERNAL_WIDTH = 8;
     
-    // Processor chain
+    // Pre-allocated buffer pool: [NodeId][Frame * Channel]
+    // Using a flat vector to avoid nested allocations
+    std::vector<float> m_nodeBufferPool;
+    std::vector<NodeId> m_executionOrder;
+    std::atomic<bool> m_graphDirty{true};
+    
     std::unique_ptr<GainProcessor> m_gainProc;
     std::unique_ptr<CompressorProcessor> m_compProc;
     
     ma_uint32 m_engineSampleRate = 48000;
     ma_uint32 m_engineChannels = 2;
     double m_tonePhase = 0.0;
+
+    // Helper to get buffer pointer for a specific node
+    inline float* get_buffer(NodeId id) {
+        if (id < 0 || id >= MAX_NODES) return nullptr;
+        return &m_nodeBufferPool[id * BUFFER_FRAMES * INTERNAL_WIDTH];
+    }
 };
 
 #endif

@@ -17,6 +17,10 @@
 namespace ix { class WebSocket; class WebSocketServer; }
 namespace httplib { class Server; class SSLServer; }
 
+using NodeId = int32_t;
+const NodeId NODE_INVALID = -1;
+const NodeId NODE_TONE_GENERATOR = 0;
+
 struct ChannelMeter {
     std::atomic<float> raw_value{0.0f};
     std::atomic<float> raw_peak{0.0f};
@@ -74,9 +78,9 @@ struct WebClientSession {
 
 struct AudioRoute {
     uint32_t id = 0;
-    std::string source_endpoint;
+    NodeId source_node = NODE_INVALID;
     unsigned source_channel = 0;
-    std::string destination_endpoint;
+    NodeId destination_node = NODE_INVALID;
     unsigned destination_channel = 0;
     float gain = 1.0f;
     bool enabled = true;
@@ -89,6 +93,7 @@ class ClientManager {
 public:
     ClientManager();
     void set_device_manager(DeviceManager* dm) { m_deviceManager = dm; }
+    void set_dsp_engine(DspEngine* dsp) { m_dspEngine = dsp; }
     std::shared_ptr<WebClientSession> create_session(uint32_t id, const std::string& remoteIp = "");
     void remove_session(uint32_t id);
     std::vector<std::shared_ptr<WebClientSession>> get_active_sessions();
@@ -105,6 +110,12 @@ public:
     bool update_route(uint32_t routeId, float gain, bool enabled);
     void update_activated_device(const std::string& id, bool active);
 
+    // Node ID Management
+    NodeId get_node_id(const std::string& endpoint) const;
+    std::string get_endpoint_from_id(NodeId id) const;
+    NodeId register_node(const std::string& endpoint);
+    void unregister_node(const std::string& endpoint);
+
 private:
     bool endpoint_exists(const std::string& endpoint, bool source) const;
     mutable std::mutex m_lock;
@@ -115,6 +126,13 @@ private:
     std::vector<std::string> m_activatedDevices;
     std::atomic<uint32_t> m_next_route_id{1};
     DeviceManager* m_deviceManager = nullptr;
+    DspEngine* m_dspEngine = nullptr;
+
+    // Node ID Mapping
+    mutable std::mutex m_node_lock;
+    std::unordered_map<std::string, NodeId> m_endpoint_to_id;
+    std::unordered_map<NodeId, std::string> m_id_to_endpoint;
+    std::atomic<NodeId> m_next_node_id{1};
 };
 
 class WebServer {

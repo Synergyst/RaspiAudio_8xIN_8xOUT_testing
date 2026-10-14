@@ -136,13 +136,60 @@ ClientManager::ClientManager()
     : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
 }
 
+NodeId ClientManager::get_node_id(const std::string& endpoint) const {
+    std::lock_guard<std::mutex> lock(m_node_lock);
+    if (endpoint == "tone/generator") return NODE_TONE_GENERATOR;
+    auto it = m_endpoint_to_id.find(endpoint);
+    return (it != m_endpoint_to_id.end()) ? it->second : NODE_INVALID;
+}
+
+std::string ClientManager::get_endpoint_from_id(NodeId id) const {
+    std::lock_guard<std::mutex> lock(m_node_lock);
+    if (id == NODE_TONE_GENERATOR) return "tone/generator";
+    auto it = m_id_to_endpoint.find(id);
+    return (it != m_id_to_endpoint.end()) ? it->second : "";
+}
+
+NodeId ClientManager::register_node(const std::string& endpoint) {
+    std::lock_guard<std::mutex> lock(m_node_lock);
+    if (endpoint == "tone/generator") return NODE_TONE_GENERATOR;
+    
+    auto it = m_endpoint_to_id.find(endpoint);
+    if (it != m_endpoint_to_id.end()) return it->second;
+    
+    NodeId id = m_next_node_id.fetch_add(1);
+    m_endpoint_to_id[endpoint] = id;
+    m_id_to_endpoint[id] = endpoint;
+    
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+    return id;
+}
+
+void ClientManager::unregister_node(const std::string& endpoint) {
+    std::lock_guard<std::mutex> lock(m_node_lock);
+    if (endpoint == "tone/generator") return;
+    
+    auto it = m_endpoint_to_id.find(endpoint);
+    if (it == m_endpoint_to_id.end()) return;
+    
+    NodeId id = it->second;
+    m_id_to_endpoint.erase(id);
+    m_endpoint_to_id.erase(it);
+    
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+}
+
 void ClientManager::update_activated_device(const std::string& id, bool active) {
     std::lock_guard<std::mutex> lock(m_lock);
     auto it = std::find(m_activatedDevices.begin(), m_activatedDevices.end(), id);
     if (active && it == m_activatedDevices.end()) {
         m_activatedDevices.push_back(id);
+        register_node("hardware/" + id + "/capture");
+        register_node("hardware/" + id + "/playback");
     } else if (!active && it != m_activatedDevices.end()) {
         m_activatedDevices.erase(it);
+        unregister_node("hardware/" + id + "/capture");
+        unregister_node("hardware/" + id + "/playback");
     }
 }
 
@@ -170,6 +217,9 @@ void ClientManager::remove_session(uint32_t id) {
             [id](const auto& session) { return session->id == id; });
         if (it == m_sessions.end()) return;
         removed = *it;
+        std::string key = removed->get_client_key();
+        unregister_node("client/" + key + "/capture");
+        unregister_node("client/" + key + "/playback");
         m_sessions.erase(it);
     }
     removed->stop_sender();
@@ -194,6 +244,8 @@ bool ClientManager::claim_identity(const std::shared_ptr<WebClientSession>& sess
     const std::string displayName = name.empty() ? key : name;
     session->set_identity(key, displayName);
     m_known_client_names[key] = displayName;
+    register_node("client/" + key + "/capture");
+    register_node("client/" + key + "/playback");
     return true;
 }
 
@@ -204,14 +256,12 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
     if (!file) return false;
     try {
         const auto settings = nlohmann::json::parse(file);
-        
         if (settings.contains("tone") && settings["tone"].is_object()) {
             const auto& value = settings["tone"];
             tone.enabled.store(value.value("enabled", false), std::memory_order_relaxed);
             tone.frequency_hz.store(std::clamp(value.value("frequency_hz", 440.0f), 1.0f, 20000.0f), std::memory_order_relaxed);
             tone.amplitude.store(std::clamp(value.value("amplitude", 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
         }
-
         if (settings.contains("hardware") && settings["hardware"].is_object()) {
             const auto& hardware = settings["hardware"];
             for (const char* type : {"capture", "playback"}) {
@@ -229,7 +279,6 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                 }
             }
         }
-
         {
             std::lock_guard<std::mutex> lock(m_lock);
             m_activatedDevices.clear();
@@ -239,11 +288,12 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                         std::string id = id_val.get<std::string>();
                         m_activatedDevices.push_back(id);
                         if (m_deviceManager) m_deviceManager->activate_device(id);
+                        register_node("hardware/" + id + "/capture");
+                        register_node("hardware/" + id + "/playback");
                     }
                 }
             }
         }
-
         {
             std::lock_guard<std::mutex> routeLock(m_route_lock);
             std::lock_guard<std::mutex> sessionLock(m_lock);
@@ -253,13 +303,15 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                 for (const auto& value : settings["routes"]) {
                     AudioRoute route;
                     route.id = value.value("id", 0u);
-                    route.source_endpoint = value.value("source", "");
+                    std::string src_ep = value.value("source", "");
+                    std::string dst_ep = value.value("destination", "");
+                    route.source_node = get_node_id(src_ep);
+                    route.destination_node = get_node_id(dst_ep);
                     route.source_channel = value.value("source_channel", CM5_MAX_CHANNELS);
-                    route.destination_endpoint = value.value("destination", "");
                     route.destination_channel = value.value("destination_channel", CM5_MAX_CHANNELS);
                     route.gain = value.value("gain", 1.0f);
                     route.enabled = value.value("enabled", true);
-                    if (!route.id || route.source_endpoint.empty() || route.destination_endpoint.empty() ||
+                    if (!route.id || src_ep.empty() || dst_ep.empty() ||
                         route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS ||
                         !std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) continue;
                     routes.push_back(route);
@@ -287,11 +339,10 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     nlohmann::json settings;
     settings["version"] = 1;
     settings["tone"] = {
-        {{"enabled", tone.enabled.load(std::memory_order_relaxed)}},
-        {{"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)}},
-        {{"amplitude", tone.amplitude.load(std::memory_order_relaxed)}}
+        {"enabled", tone.enabled.load(std::memory_order_relaxed)},
+        {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)},
+        {"amplitude", tone.amplitude.load(std::memory_order_relaxed)}
     };
-    
     settings["hardware"]["capture"] = nlohmann::json::array();
     for (auto const& [id, bank] : controls.capture) {
         for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
@@ -302,7 +353,6 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             });
         }
     }
-
     settings["hardware"]["playback"] = nlohmann::json::array();
     for (auto const& [id, bank] : controls.playback) {
         for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
@@ -313,7 +363,6 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             });
         }
     }
-    
     {
         auto* mutableThis = const_cast<ClientManager*>(this);
         std::lock_guard<std::mutex> lock(mutableThis->m_lock);
@@ -322,15 +371,17 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             settings["activated_devices"].push_back(id);
         }
     }
-    
     {
         std::lock_guard<std::mutex> routeLock(m_route_lock);
         std::lock_guard<std::mutex> sessionLock(m_lock);
         settings["routes"] = nlohmann::json::array();
         for (const auto& route : *std::atomic_load(&m_routes)) {
             settings["routes"].push_back({
-                {"id", route.id}, {"source", route.source_endpoint}, {"source_channel", route.source_channel},
-                {"destination", route.destination_endpoint}, {"destination_channel", route.destination_channel},
+                {"id", route.id}, 
+                {"source", get_endpoint_from_id(route.source_node)}, 
+                {"source_channel", route.source_channel},
+                {"destination", get_endpoint_from_id(route.destination_node)}, 
+                {"destination_channel", route.destination_channel},
                 {"gain", route.gain}, {"enabled", route.enabled}
             });
         }
@@ -369,13 +420,11 @@ std::vector<AudioRoute> ClientManager::get_routes() const {
 
 bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) const {
     if (source && endpoint == "tone/generator") return true;
-
     if (endpoint.compare(0, 9, "hardware/") == 0) {
         const std::string suffix = source ? "/capture" : "/playback";
         if (endpoint.size() < 10 + suffix.size() || endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
         return true; 
     }
-
     const std::string prefix = "client/";
     const std::string suffix = source ? "/capture" : "/playback";
     if (endpoint.size() <= prefix.size() + suffix.size() || endpoint.compare(0, prefix.size(), prefix) != 0 ||
@@ -394,27 +443,25 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
     if (!std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) {
         error = "gain must be finite and between 0 and 8"; return false;
     }
+    if (route.source_node == NODE_INVALID || route.destination_node == NODE_INVALID) {
+        error = "source or destination endpoint is invalid or unregistered"; return false;
+    }
     std::lock_guard<std::mutex> routeLock(m_route_lock);
     std::lock_guard<std::mutex> sessionLock(m_lock);
-    if (!endpoint_exists(route.source_endpoint, true) || !endpoint_exists(route.destination_endpoint, false)) {
-        error = "source or destination endpoint is unavailable"; return false;
-    }
-    
     auto routes = *std::atomic_load(&m_routes);
-    
     for (const auto& existing : routes) {
-        if (existing.source_endpoint == route.source_endpoint &&
+        if (existing.source_node == route.source_node &&
             existing.source_channel == route.source_channel &&
-            existing.destination_endpoint == route.destination_endpoint &&
+            existing.destination_node == route.destination_node &&
             existing.destination_channel == route.destination_channel) {
             error = "This routing connection already exists";
             return false;
         }
     }
-
     route.id = assignedId = m_next_route_id.fetch_add(1);
     routes.push_back(std::move(route));
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
     return true;
 }
 
@@ -425,6 +472,7 @@ bool ClientManager::remove_route(uint32_t routeId) {
     routes.erase(std::remove_if(routes.begin(), routes.end(), [routeId](const auto& route) { return route.id == routeId; }), routes.end());
     if (routes.size() == oldSize) return false;
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
     return true;
 }
 
@@ -437,6 +485,7 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
     it->gain = gain;
     it->enabled = enabled;
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
     return true;
 }
 
@@ -463,7 +512,6 @@ bool WebServer::start() {
             std::cerr << (m_plainText ? "[HTTP] Plain HTTP enabled" : "[HTTP] TLS certificate/key not found; serving plain HTTP") << std::endl;
             m_httpServer = std::make_unique<httplib::Server>();
         }
-        
         m_httpServer->set_mount_point("/client", "./web_client");
         m_httpServer->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& response) {
             std::ifstream certificate(certPath, std::ios::in | std::ios::binary);
@@ -710,7 +758,6 @@ bool WebServer::start() {
         m_httpServer->Get("/api/graph", [this](const httplib::Request&, httplib::Response& response) {
             nlohmann::json j;
             j["revision"] = 1;
-            
             auto endpoints = nlohmann::json::array();
             const auto activeHw = m_deviceMgr.get_active_devices();
             for (const auto& dev : activeHw) {
@@ -723,7 +770,6 @@ bool WebServer::start() {
                 }
             }
             endpoints.push_back({{"id", "tone/generator"}, {"direction", "source"}, {"channels", 8}});
-            
             const auto sessions = m_clientMgr.get_active_sessions();
             for (const auto& s : sessions) {
                 std::string key = s->get_client_key();
@@ -739,29 +785,29 @@ bool WebServer::start() {
                 endpoints.push_back({{"id", "client/" + known.first + "/playback"}, {"name", known.second}, {"connected", false}, {"direction", "destination"}, {"channels", 2}});
             }
             j["endpoints"] = endpoints;
-
             auto routes = nlohmann::json::array();
             const auto routeList = m_clientMgr.get_routes();
             for (const auto& r : routeList) {
                 routes.push_back({
                     {"id", r.id},
-                    {"source", r.source_endpoint},
+                    {"source", m_clientMgr.get_endpoint_from_id(r.source_node)},
                     {"source_channel", r.source_channel},
-                    {"destination", r.destination_endpoint},
+                    {"destination", m_clientMgr.get_endpoint_from_id(r.destination_node)},
                     {"destination_channel", r.destination_channel},
                     {"gain", r.gain},
                     {"enabled", r.enabled}
                 });
             }
             j["routes"] = routes;
-
             response.set_content(j.dump(2), "application/json");
         });
 
         m_httpServer->Post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
             AudioRoute route;
-            route.source_endpoint = request.has_param("source") ? request.get_param_value("source") : "";
-            route.destination_endpoint = request.has_param("destination") ? request.get_param_value("destination") : "";
+            std::string src_ep = request.has_param("source") ? request.get_param_value("source") : "";
+            std::string dst_ep = request.has_param("destination") ? request.get_param_value("destination") : "";
+            route.source_node = m_clientMgr.get_node_id(src_ep);
+            route.destination_node = m_clientMgr.get_node_id(dst_ep);
             route.source_channel = query_uint(request, "source_ch", 99);
             route.destination_channel = query_uint(request, "destination_ch", 99);
             route.gain = query_float(request, "gain", 1.0f);
@@ -803,7 +849,6 @@ bool WebServer::start() {
                 const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
                 const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
                 if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
-                
                 auto& bank = (type == "playback") ? m_controls.playback[endpoint] : m_controls.capture[endpoint];
                 if (request.has_param("gain")) {
                     const float gain = std::stof(request.get_param_value("gain"));
@@ -829,14 +874,13 @@ bool WebServer::start() {
                     const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
                     const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
                     if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
-                    
                     auto& bank = (type == "playback") ? m_metrics.playback[endpoint] : m_metrics.capture[endpoint];
                     bank[channel].clipped.store(false); bank[channel].peak_hold_db.store(-60.0f);
                 }
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }
         });
-        m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html; charset=UTF-8"); });
+        m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html"); });
         std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://" << "0.0.0.0:" << m_httpPort << std::endl;
         m_httpServer->listen("0.0.0.0", m_httpPort);
     });
@@ -889,10 +933,8 @@ bool WebServer::start() {
 
 void WebServer::stop() {
     if (!m_running.exchange(false)) return;
-    
     if (m_httpServer) m_httpServer->stop();
     if (m_wsServer) m_wsServer->stop();
-    
     if (m_httpThread.joinable()) m_httpThread.join();
     if (m_wsThread.joinable()) m_wsThread.join();
 }
