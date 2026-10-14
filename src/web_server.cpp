@@ -201,6 +201,7 @@ std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, con
     session->set_identity("connection-" + std::to_string(id), "Client " + std::to_string(id));
     session->incoming_rb.init(ma_format_f32, 1, 48000);
     session->outgoing_rb.init(ma_format_f32, 2, 48000);
+    session->io_buffer.resize(CM5_BUFFER_FRAMES * CM5_MAX_CHANNELS);
     session->input_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
     session->output_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
     session->packet_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);

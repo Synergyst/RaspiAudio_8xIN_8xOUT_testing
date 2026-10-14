@@ -10,6 +10,7 @@
 #include <memory>
 #include <cmath>
 #include <string>
+#include <unordered_map>
 
 class ClientManager;
 
@@ -71,6 +72,15 @@ private:
     float m_envelope = 1.0f;
 };
 
+// Mapping of NodeId to its physical handler
+struct NodeHandler {
+    enum class Type { HARDWARE_CAPTURE, HARDWARE_PLAYBACK, CLIENT_CAPTURE, CLIENT_PLAYBACK, TONE };
+    Type type;
+    void* ptr; // Pointer to HardwareDevice or WebClientSession
+    unsigned channels;
+    std::string endpointId;
+};
+
 class DspEngine {
 public:
     DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone);
@@ -98,26 +108,22 @@ private:
     
     // Real-time Hardening State
     static constexpr size_t MAX_NODES = 256;
-    static constexpr size_t BUFFER_FRAMES = 480;
-    static constexpr size_t INTERNAL_WIDTH = 8;
     
     // Pre-allocated buffer pool: [NodeId][Frame * Channel]
-    // Using a flat vector to avoid nested allocations
     std::vector<float> m_nodeBufferPool;
     std::vector<NodeId> m_executionOrder;
+    std::unordered_map<NodeId, NodeHandler> m_nodeHandlers;
     std::atomic<bool> m_graphDirty{true};
     
     std::unique_ptr<GainProcessor> m_gainProc;
     std::unique_ptr<CompressorProcessor> m_compProc;
     
     ma_uint32 m_engineSampleRate = 48000;
-    ma_uint32 m_engineChannels = 2;
     double m_tonePhase = 0.0;
 
-    // Helper to get buffer pointer for a specific node
     inline float* get_buffer(NodeId id) {
         if (id < 0 || id >= MAX_NODES) return nullptr;
-        return &m_nodeBufferPool[id * BUFFER_FRAMES * INTERNAL_WIDTH];
+        return &m_nodeBufferPool[id * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
     }
 };
 

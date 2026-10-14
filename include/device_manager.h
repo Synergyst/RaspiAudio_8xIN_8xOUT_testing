@@ -36,6 +36,9 @@ public:
     // Node ID tracking for zero-allocation routing
     NodeId node_id = -1;
 
+    // Pre-allocated buffers for zero-allocation I/O
+    std::vector<float> io_buffer;
+
 private:
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 

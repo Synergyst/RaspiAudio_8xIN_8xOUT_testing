@@ -60,6 +60,7 @@ struct WebClientSession {
     std::atomic<unsigned> output_channels{2};
     PcmRingBuffer incoming_rb;
     PcmRingBuffer outgoing_rb;
+    std::vector<float> io_buffer;
     std::vector<float> input_block;
     std::vector<float> output_block;
     std::array<ChannelMeter, CM5_MAX_CHANNELS> input_metrics;

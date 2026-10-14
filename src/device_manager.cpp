@@ -11,6 +11,9 @@ HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context)
     if (bufferFrames == 0) bufferFrames = 4800;
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
+    
+    // Pre-allocate I/O buffer for zero-allocation routing
+    io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
 }
 
 HardwareDevice::~HardwareDevice() { stop(); }
