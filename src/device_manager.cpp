@@ -5,8 +5,8 @@
 #include <cstring>
 #include <set>
 
-HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context) 
-    : m_info(info), m_context(context) {
+HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
+    : m_info(info), m_context(context), m_originalId(originalId) {
     ma_uint32 bufferFrames = m_info.sample_rate / 10; 
     if (bufferFrames == 0) bufferFrames = 4800;
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
@@ -99,16 +99,12 @@ void DeviceManager::enumerate_devices() {
         info.name = pDeviceInfo->name;
         info.is_capture = (type == ma_device_type_capture);
         
-        // LOGGING: Let's see what's actually happening with the native formats
         std::cout << "  - Found " << (type == ma_device_type_capture ? "Input" : "Output") 
                   << ": " << pDeviceInfo->name << " [" << pDeviceInfo->id.alsa << "]" << std::endl;
-        std::cout << "    Native Formats Count: " << pDeviceInfo->nativeDataFormatCount << std::endl;
 
         unsigned maxChannels = 0;
         ma_uint32 bestSampleRate = 48000;
         for (unsigned i = 0; i < pDeviceInfo->nativeDataFormatCount; ++i) {
-            std::cout << "    Format[" << i << "]: " << pDeviceInfo->nativeDataFormats[i].channels << "ch, " 
-                      << pDeviceInfo->nativeDataFormats[i].sampleRate << "Hz" << std::endl;
             if (pDeviceInfo->nativeDataFormats[i].channels > maxChannels) {
                 maxChannels = pDeviceInfo->nativeDataFormats[i].channels;
                 bestSampleRate = pDeviceInfo->nativeDataFormats[i].sampleRate;
@@ -118,7 +114,6 @@ void DeviceManager::enumerate_devices() {
         info.channels = (maxChannels > 0) ? maxChannels : 2;
         info.sample_rate = bestSampleRate;
 
-        // SMART FALLBACK: If it's a DAC8x and we only found 2 channels, force 8.
         if (info.channels < 8 && (info.name.find("8x") != std::string::npos || info.name.find("DAC8") != std::string::npos)) {
             std::cout << "    [SENSING] Device name suggests 8-channel hardware. Overriding 2ch -> 8ch." << std::endl;
             info.channels = 8;
@@ -153,14 +148,13 @@ bool DeviceManager::activate_device(const std::string& id) {
             
             AudioDeviceInfo info = baseInfo;
 
-            // OVERRIDE: Use the virtual device from asound.conf for HiFiBerry Playback to enable 8-ch softvol/plug
             std::string alsaId = info.id.alsa;
             if (!info.is_capture && (alsaId.find("hifiberry") != std::string::npos || info.name.find("HiFiBerry") != std::string::npos)) {
                 std::cout << "[DeviceManager] Routing HiFiBerry Playback through virtual device 'dac8x' (asound.conf)" << std::endl;
                 std::strncpy(info.id.alsa, "dac8x", sizeof(info.id.alsa) - 1);
             }
 
-            auto dev = std::make_shared<HardwareDevice>(info, &m_context);
+            auto dev = std::make_shared<HardwareDevice>(info, &m_context, id);
             if (dev->init()) {
                 m_active_devices[uniqueKey] = dev;
                 anyActivated = true;

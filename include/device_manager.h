@@ -23,7 +23,7 @@ struct AudioDeviceInfo {
 
 class HardwareDevice {
 public:
-    HardwareDevice(const AudioDeviceInfo& info, ma_context* context);
+    HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId);
     ~HardwareDevice();
 
     bool init();
@@ -32,6 +32,7 @@ public:
     const AudioDeviceInfo& get_info() const { return m_info; }
     PcmRingBuffer& get_input_buffer() { return m_input_rb; }
     PcmRingBuffer& get_output_buffer() { return m_output_rb; }
+    const std::string& get_original_id() const { return m_originalId; }
 
     // Node ID tracking for zero-allocation routing
     NodeId node_id = -1;
@@ -47,6 +48,7 @@ private:
     ma_device m_device;
     PcmRingBuffer m_input_rb;
     PcmRingBuffer m_output_rb;
+    std::string m_originalId;
 };
 
 class DeviceManager {

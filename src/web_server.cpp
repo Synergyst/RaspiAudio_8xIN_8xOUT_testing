@@ -229,7 +229,7 @@ void ClientManager::remove_session(uint32_t id) {
 std::vector<std::shared_ptr<WebClientSession>> ClientManager::get_active_sessions() {
     std::lock_guard<std::mutex> lock(m_lock);
     std::vector<std::shared_ptr<WebClientSession>> active;
-    for (const auto& session : m_sessions)
+    for (auto& session : m_sessions)
         if (session->active.load(std::memory_order_relaxed)) active.push_back(session);
     return active;
 }
@@ -328,9 +328,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
             }
         }
         return true;
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
 }
 
 bool ClientManager::save_settings(const AudioControls& controls, const ToneControls& tone) const {
@@ -388,7 +386,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
         }
         settings["clients"] = nlohmann::json::object();
         for (auto const& client : m_known_client_names) settings["clients"][client.first] = client.second;
-        for (const auto& session : m_sessions) {
+        for (auto const& session : m_sessions) {
             const std::string key = session->get_client_key();
             if (!key.empty()) settings["clients"][key] = session->get_client_name();
         }
@@ -524,7 +522,7 @@ bool WebServer::start() {
             std::ostringstream contents;
             contents << certificate.rdbuf();
             response.set_header("Content-Disposition", "attachment; filename=server.crt");
-            response.set_content(contents.str(), "application/x-x509-ca-cert");
+            response.set_content(contents.str(), "application/x-signed-certificate");
         });
         m_httpServer->Get("/server.key", [keyPath](const httplib::Request&, httplib::Response& response) {
             std::ifstream privateKey(keyPath, std::ios::in | std::ios::binary);
@@ -536,7 +534,7 @@ bool WebServer::start() {
             std::ostringstream contents;
             contents << privateKey.rdbuf();
             response.set_header("Content-Disposition", "attachment; filename=server.key");
-            response.set_content(contents.str(), "application/x-pem-file");
+            response.set_content(contents.str(), "application/x-pem-key");
         });
         m_httpServer->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& response) {
             std::ifstream bundle(p12Path, std::ios::in | std::ios::binary);
@@ -696,7 +694,7 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) {
                 response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}","application/json");
             }
         });
 
@@ -731,7 +729,7 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& e) {
                 response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}","application/json");
             }
         });
 
@@ -743,8 +741,7 @@ bool WebServer::start() {
                 const auto& s = sessions[i];
                 json << "{\"id\":" << s->id << ",\"client_id\":\"" << json_escape(s->get_client_key())
                      << "\",\"name\":\"" << json_escape(s->get_client_name())
-                     << "\",\"ip\":\"" << json_escape(s->remote_ip)
-                     << "\",\"input_channels\":" << s->input_channels.load()
+                     << "\",\"ip\":\"" << s->remote_ip << "\",\"input_channels\":" << s->input_channels.load()
                      << ",\"output_channels\":" << s->output_channels.load()
                      << ",\"input_meters\":";
                 append_meter_json(json, s->input_metrics, s->input_channels.load());
@@ -762,7 +759,7 @@ bool WebServer::start() {
             auto endpoints = nlohmann::json::array();
             const auto activeHw = m_deviceMgr.get_active_devices();
             for (const auto& dev : activeHw) {
-                const std::string id = dev->get_info().id.alsa;
+                const std::string id = dev->get_original_id();
                 const std::string name = dev->get_info().name;
                 if (dev->get_info().is_capture) {
                     endpoints.push_back({{"id", "hardware/" + id + "/capture"}, {"direction", "source"}, {"channels", dev->get_info().channels}, {"name", name}});
@@ -816,7 +813,7 @@ bool WebServer::start() {
             uint32_t id = 0; std::string error;
             if (!m_clientMgr.add_route(std::move(route), id, error)) {
                 response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}", "application/json");
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}","application/json");
                 return;
             }
             response.set_content("{\"status\":\"ok\",\"id\":" + std::to_string(id) + "}", "application/json");
@@ -835,7 +832,6 @@ bool WebServer::start() {
             }
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
-
         m_httpServer->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
             if (!m_clientMgr.save_settings(m_controls, m_tone)) {
                 response.status = 500; response.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
@@ -843,7 +839,6 @@ bool WebServer::start() {
             }
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
-
         m_httpServer->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
@@ -858,7 +853,7 @@ bool WebServer::start() {
                 }
                 if (request.has_param("mute")) bank[channel].mute.store(request.get_param_value("mute") == "1");
                 response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }
+            } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}","application/json"); }
         });
         m_httpServer->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
             try {
@@ -879,7 +874,7 @@ bool WebServer::start() {
                     bank[channel].clipped.store(false); bank[channel].peak_hold_db.store(-60.0f);
                 }
                 response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json"); }
+            } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}","application/json"); }
         });
         m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html"); });
         std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://" << "0.0.0.0:" << m_httpPort << std::endl;

@@ -78,8 +78,10 @@ void DspEngine::rebuild_graph() {
 
     auto activeDevices = m_deviceManager.get_active_devices();
     for (auto& dev : activeDevices) {
-        NodeId captureId = m_clientManager.get_node_id("hardware/" + std::string(dev->get_info().id.alsa) + "/capture");
-        NodeId playbackId = m_clientManager.get_node_id("hardware/" + std::string(dev->get_info().id.alsa) + "/playback");
+        // FIX: Use original_id to match the logical NodeIds registered in ClientManager
+        std::string origId = dev->get_original_id();
+        NodeId captureId = m_clientManager.get_node_id("hardware/" + origId + "/capture");
+        NodeId playbackId = m_clientManager.get_node_id("hardware/" + origId + "/playback");
         if (captureId != NODE_INVALID) activeNodes.insert(captureId);
         if (playbackId != NODE_INVALID) activeNodes.insert(playbackId);
     }
@@ -113,7 +115,7 @@ void DspEngine::rebuild_graph() {
                 std::string id = endpoint.substr(firstSlash, secondSlash - firstSlash);
                 bool isCapture = (endpoint.find("/capture") != std::string::npos);
                 for (auto& dev : activeDevices) {
-                    if (dev->get_info().id.alsa == id) {
+                    if (std::string(dev->get_info().id.alsa) == id || dev->get_original_id() == id) {
                         m_nodeHandlers[node] = {isCapture ? NodeHandler::Type::HARDWARE_CAPTURE : NodeHandler::Type::HARDWARE_PLAYBACK, dev.get(), dev->get_info().channels, endpoint};
                         break;
                     }
