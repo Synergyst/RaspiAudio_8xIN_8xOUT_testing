@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace {
 
@@ -84,30 +85,30 @@ std::string read_dashboard() {
 
 std::string read_favicon() {
     std::ifstream file("./web_client/favicon.ico", std::ios::in | std::ios::binary);
-    if (!file) return ""; // Return an empty string on failure for binary files
+    if (!file) return ""; 
     std::ostringstream contents;
     contents << file.rdbuf();
     return contents.str();
 }
 
-void append_meter_json(std::ostringstream& json, const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters, unsigned channels) {
-    channels = std::min(channels, CM5_MAX_CHANNELS);
-    json << '[';
-    for (unsigned i = 0; i < channels; ++i) {
-        const auto& meter = meters[i];
-        json << "{\"ch\":" << i
-             << ",\"raw_value\":" << meter.raw_value.load(std::memory_order_relaxed)
-             << ",\"raw_peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-             << ",\"rms_db\":" << meter.rms_db.load(std::memory_order_relaxed)
-             << ",\"peak_db\":" << meter.peak_db.load(std::memory_order_relaxed)
-             << ",\"peak_hold_db\":" << meter.peak_hold_db.load(std::memory_order_relaxed)
-             << ",\"clipped\":" << (meter.clipped.load(std::memory_order_relaxed) ? "true" : "false")
-             << "}" << (i + 1 == channels ? "" : ",");
+nlohmann::json build_meter_json(const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters, unsigned channels) {
+    nlohmann::json arr = nlohmann::json::array();
+    unsigned count = std::min(channels, CM5_MAX_CHANNELS);
+    for (unsigned i = 0; i < count; ++i) {
+        const auto& m = meters[i];
+        nlohmann::json mj;
+        mj["ch"] = i;
+        mj["raw_value"] = m.raw_value.load(std::memory_order_relaxed);
+        mj["raw_peak"] = m.raw_peak.load(std::memory_order_relaxed);
+        mj["rms_db"] = m.rms_db.load(std::memory_order_relaxed);
+        mj["peak_db"] = m.peak_db.load(std::memory_order_relaxed);
+        mj["peak_hold_db"] = m.peak_hold_db.load(std::memory_order_relaxed);
+        mj["clipped"] = m.clipped.load(std::memory_order_relaxed);
+        arr.push_back(mj);
     }
-    json << ']';
+    return arr;
 }
 
-// Factory for creating AudioProcessors from JSON definitions
 std::unique_ptr<AudioProcessor> create_processor(const std::string& type, const nlohmann::json& params) {
     if (type == "gain") {
         return std::make_unique<GainProcessor>(params.value("gain", 1.0f));
@@ -349,7 +350,6 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     routes.push_back(route);
                     nextId = std::max(nextId, route.id + 1);
 
-                    // --- LOAD DSP CHAIN ---
                     if (m_dspEngine && value.contains("dsp") && value["dsp"].is_object()) {
                         const auto& dsp = value["dsp"];
                         uint32_t rId = route.id;
@@ -446,7 +446,6 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             rj["gain"] = route.gain;
             rj["enabled"] = route.enabled;
 
-            // --- SAVE DSP CHAIN ---
             {
                 std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
                 if (g_dspSettingsCache.count(route.id)) {
@@ -629,37 +628,11 @@ bool WebServer::start() {
             nlohmann::json j;
             j["capture"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.capture) {
-                nlohmann::json arr = nlohmann::json::array();
-                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                    const auto& m = meters_array[i];
-                    arr.push_back({
-                        {"ch", i},
-                        {"raw_value", m.raw_value.load(std::memory_order_relaxed)},
-                        {"raw_peak", m.raw_peak.load(std::memory_order_relaxed)},
-                        {"rms_db", m.rms_db.load(std::memory_order_relaxed)},
-                        {"peak_db", m.peak_db.load(std::memory_order_relaxed)},
-                        {"peak_hold_db", m.peak_hold_db.load(std::memory_order_relaxed)},
-                        {"clipped", m.clipped.load(std::memory_order_relaxed) ? "true" : "false"}
-                    });
-                }
-                j["capture"][id] = arr;
+                j["capture"][id] = build_meter_json(meters_array, CM5_MAX_CHANNELS);
             }
             j["playback"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.playback) {
-                nlohmann::json arr = nlohmann::json::array();
-                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
-                    const auto& m = meters_array[i];
-                    arr.push_back({
-                        {"ch", i},
-                        {"raw_value", m.raw_value.load(std::memory_order_relaxed)},
-                        {"raw_peak", m.raw_peak.load(std::memory_order_relaxed)},
-                        {"rms_db", m.rms_db.load(std::memory_order_relaxed)},
-                        {"peak_db", m.peak_db.load(std::memory_order_relaxed)},
-                        {"peak_hold_db", m.peak_hold_db.load(std::memory_order_relaxed)},
-                        {"clipped", m.clipped.load(std::memory_order_relaxed) ? "true" : "false"}
-                    });
-                }
-                j["playback"][id] = arr;
+                j["playback"][id] = build_meter_json(meters_array, CM5_MAX_CHANNELS);
             }
             response.set_content(j.dump(2), "application/json");
         };
@@ -712,47 +685,34 @@ bool WebServer::start() {
         m_httpServer->Get("/api/meters", meters);
         m_httpServer->Get("/api/metrics", meters);
         m_httpServer->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
-            std::ostringstream json;
-            json << "{\"capture\":{";
-            bool first = true;
+            nlohmann::json j;
+            j["capture"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.capture) {
-                if (!first) json << ",";
-                json << "\"" << id << "\":[";
+                nlohmann::json arr = nlohmann::json::array();
                 for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
                     const auto& meter = meters_array[i];
-                    json << "{\"ch\":" << i
-                         << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                         << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                         << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                    arr.push_back({{"ch", i}, {"value", meter.raw_value.load(std::memory_order_relaxed)}, {"peak", meter.raw_peak.load(std::memory_order_relaxed)}});
                 }
-                json << "]";
-                first = false;
+                j["capture"][id] = arr;
             }
-            json << "},\"playback\":{";
-            first = true;
+            j["playback"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.playback) {
-                if (!first) json << ",";
-                json << "\"" << id << "\":[";
+                nlohmann::json arr = nlohmann::json::array();
                 for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
                     const auto& meter = meters_array[i];
-                    json << "{\"ch\":" << i
-                         << ",\"value\":" << meter.raw_value.load(std::memory_order_relaxed)
-                         << ",\"peak\":" << meter.raw_peak.load(std::memory_order_relaxed)
-                         << "}" << (i + 1 == CM5_MAX_CHANNELS ? "" : ",");
+                    arr.push_back({{"ch", i}, {"value", meter.raw_value.load(std::memory_order_relaxed)}, {"peak", meter.raw_peak.load(std::memory_order_relaxed)}});
                 }
-                json << "]";
-                first = false;
+                j["playback"][id] = arr;
             }
-            json << "}}";
-            response.set_content(json.str(), "application/json");
+            response.set_content(j.dump(2), "application/json");
         });
 
         m_httpServer->Get("/api/tone", [this](const httplib::Request&, httplib::Response& response) {
-            std::ostringstream json;
-            json << "{\"enabled\":" << (m_tone.enabled.load() ? "true" : "false")
-                 << ",\"frequency_hz\":" << m_tone.frequency_hz.load()
-                 << ",\"amplitude\":" << m_tone.amplitude.load() << '}';
-            response.set_content(json.str(), "application/json");
+            nlohmann::json j;
+            j["enabled"] = m_tone.enabled.load();
+            j["frequency_hz"] = m_tone.frequency_hz.load();
+            j["amplitude"] = m_tone.amplitude.load();
+            response.set_content(j.dump(2), "application/json");
         });
         m_httpServer->Post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
             try {
@@ -811,66 +771,96 @@ bool WebServer::start() {
 
         m_httpServer->Get("/api/clients", [this](const httplib::Request&, httplib::Response& response) {
             const auto sessions = m_clientMgr.get_active_sessions();
-            std::ostringstream json;
-            json << "{\"clients\":[";
-            for (size_t i = 0; i < sessions.size(); ++i) {
-                const auto& s = sessions[i];
-                json << "{\"id\":" << s->id << ",\"client_id\":\"" << json_escape(s->get_client_key())
-                     << "\",\"name\":\"" << json_escape(s->get_client_name())
-                     << "\",\"ip\":\"" << s->remote_ip << "\",\"input_channels\":" << s->input_channels.load()
-                     << ",\"output_channels\":" << s->output_channels.load()
-                     << ",\"input_meters\":";
-                append_meter_json(json, s->input_metrics, s->input_channels.load());
-                json << ",\"output_meters\":";
-                append_meter_json(json, s->output_metrics, s->output_channels.load());
-                json << "}" << (i + 1 == sessions.size() ? "" : ",");
+            nlohmann::json j;
+            j["clients"] = nlohmann::json::array();
+            for (const auto& s : sessions) {
+                nlohmann::json sj;
+                sj["id"] = s->id;
+                sj["client_id"] = s->get_client_key();
+                sj["name"] = s->get_client_name();
+                sj["ip"] = s->remote_ip;
+                sj["input_channels"] = s->input_channels.load();
+                sj["output_channels"] = s->output_channels.load();
+                sj["input_meters"] = build_meter_json(s->input_metrics, s->input_channels.load());
+                sj["output_meters"] = build_meter_json(s->output_metrics, s->output_channels.load());
+                j["clients"].push_back(sj);
             }
-            json << "]}";
-            response.set_content(json.str(), "application/json");
+            response.set_content(j.dump(2), "application/json");
         });
 
         m_httpServer->Get("/api/graph", [this](const httplib::Request&, httplib::Response& response) {
             nlohmann::json j;
             j["revision"] = 1;
-            auto endpoints = nlohmann::json::array();
+            
+            std::unordered_map<std::string, nlohmann::json> endpointsMap;
+
             const auto activeHw = m_deviceMgr.get_active_devices();
             for (const auto& dev : activeHw) {
                 const std::string id = dev->get_original_id();
                 const std::string name = dev->get_info().name;
                 if (dev->get_info().is_capture) {
-                    endpoints.push_back({{"id", "hardware/" + id + "/capture"}, {"direction", "source"}, {"channels", dev->get_info().channels}, {"name", name}});
+                    std::string epId = "hardware/" + id + "/capture";
+                    nlohmann::json ep;
+                    ep["id"] = epId; ep["direction"] = "source"; ep["channels"] = dev->get_info().channels; ep["name"] = name;
+                    endpointsMap[epId] = ep;
                 } else {
-                    endpoints.push_back({{"id", "hardware/" + id + "/playback"}, {"direction", "destination"}, {"channels", dev->get_info().channels}, {"name", name}});
+                    std::string epId = "hardware/" + id + "/playback";
+                    nlohmann::json ep;
+                    ep["id"] = epId; ep["direction"] = "destination"; ep["channels"] = dev->get_info().channels; ep["name"] = name;
+                    endpointsMap[epId] = ep;
                 }
             }
-            endpoints.push_back({{"id", "tone/generator"}, {"direction", "source"}, {"channels", 8}});
+            
+            nlohmann::json toneEp;
+            toneEp["id"] = "tone/generator"; toneEp["direction"] = "source"; toneEp["channels"] = 8;
+            endpointsMap["tone/generator"] = toneEp;
+            
             const auto sessions = m_clientMgr.get_active_sessions();
             for (const auto& s : sessions) {
                 std::string key = s->get_client_key();
                 std::string name = s->get_client_name();
-                endpoints.push_back({{"id", "client/" + key + "/capture"}, {"name", name}, {"connected", true}, {"direction", "source"}, {"channels", s->input_channels.load()}});
-                endpoints.push_back({{"id", "client/" + key + "/playback"}, {"name", name}, {"connected", true}, {"direction", "destination"}, {"channels", s->output_channels.load()}});
+                
+                std::string capId = "client/" + key + "/capture";
+                nlohmann::json capEp;
+                capEp["id"] = capId; capEp["name"] = name; capEp["connected"] = true; capEp["direction"] = "source"; capEp["channels"] = s->input_channels.load();
+                endpointsMap[capId] = capEp;
+
+                std::string playId = "client/" + key + "/playback";
+                nlohmann::json playEp;
+                playEp["id"] = playId; playEp["name"] = name; playEp["connected"] = true; playEp["direction"] = "destination"; playEp["channels"] = s->output_channels.load();
+                endpointsMap[playId] = playEp;
             }
             for (const auto& known : m_clientMgr.known_client_names()) {
-                bool active = false;
-                for (auto& s : sessions) active = active || s->get_client_key() == known.first;
-                if (active) continue;
-                endpoints.push_back({{"id", "client/" + known.first + "/capture"}, {"name", known.second}, {"connected", false}, {"direction", "source"}, {"channels", 1}});
-                endpoints.push_back({{"id", "client/" + known.first + "/playback"}, {"name", known.second}, {"connected", false}, {"direction", "destination"}, {"channels", 2}});
+                const std::string capId = "client/" + known.first + "/capture";
+                const std::string playId = "client/" + known.first + "/playback";
+                if (endpointsMap.find(capId) == endpointsMap.end()) {
+                    nlohmann::json capEp;
+                    capEp["id"] = capId; capEp["name"] = known.second; capEp["connected"] = false; capEp["direction"] = "source"; capEp["channels"] = 1;
+                    endpointsMap[capId] = capEp;
+                }
+                if (endpointsMap.find(playId) == endpointsMap.end()) {
+                    nlohmann::json playEp;
+                    playEp["id"] = playId; playEp["name"] = known.second; playEp["connected"] = false; playEp["direction"] = "destination"; playEp["channels"] = 2;
+                    endpointsMap[playId] = playEp;
+                }
             }
+
+            nlohmann::json endpoints = nlohmann::json::array();
+            for (auto const& [id, ep] : endpointsMap) endpoints.push_back(ep);
             j["endpoints"] = endpoints;
-            auto routes = nlohmann::json::array();
+
+            nlohmann::json routes = nlohmann::json::array();
             const auto routeList = m_clientMgr.get_routes();
             for (const auto& r : routeList) {
-                routes.push_back({
-                    {"id", r.id},
-                    {"source", m_clientMgr.get_endpoint_from_id(r.source_node)},
-                    {"source_channel", r.source_channel},
-                    {"destination", m_clientMgr.get_endpoint_from_id(r.destination_node)},
-                    {"destination_channel", r.destination_channel},
-                    {"gain", r.gain},
-                    {"enabled", r.enabled}
-                });
+                nlohmann::json rj;
+                rj["id"] = r.id;
+                rj["source"] = m_clientMgr.get_endpoint_from_id(r.source_node);
+                rj["source_channel"] = r.source_channel;
+                rj["destination"] = m_clientMgr.get_endpoint_from_id(r.destination_node);
+                rj["destination_channel"] = r.destination_channel;
+                rj["gain"] = r.gain;
+                rj["enabled"] = r.enabled;
+                routes.push_back(rj);
             }
             j["routes"] = routes;
             response.set_content(j.dump(2), "application/json");
@@ -910,8 +900,6 @@ bool WebServer::start() {
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
-        // --- NEW: ROUTE DSP CONTROL PLANE ---
-
         m_httpServer->Get(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
             uint32_t routeId = 0;
             if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
@@ -948,16 +936,16 @@ bool WebServer::start() {
                         std::string type = proc.value("type", "passthrough");
                         nlohmann::json params = proc.value("params", nlohmann::json::object());
                         chain.push_back(create_processor(type, params));
-                        chainJson.push_back({{"type", type}, {"params", params}});
+                        nlohmann::json pj;
+                        pj["type"] = type; pj["params"] = params;
+                        chainJson.push_back(pj);
                     }
                 }
 
-                // Update Engine
                 m_dspEngine.set_route_dsp_active(routeId, active);
                 m_dspEngine.set_route_gain(routeId, gain);
                 m_dspEngine.update_route_chain(routeId, std::move(chain));
 
-                // Update Cache for persistence
                 {
                     std::lock_guard<std::mutex> lock(g_dspCacheLock);
                     g_dspSettingsCache[routeId] = { active, gain, chainJson };
@@ -1046,7 +1034,14 @@ bool WebServer::start() {
             const uint32_t id = nextId.fetch_add(1);
             const auto session = m_clientMgr.create_session(id, state ? state->getRemoteIp() : "");
             session->start_sender(socket);
-            socket->sendText(nlohmann::json{{"type", "assigned"}, {"connection_id", id}, {"client_id", session->get_client_key()}, {"name", session->get_client_name()}}.dump());
+            
+            nlohmann::json assigned;
+            assigned["type"] = "assigned";
+            assigned["connection_id"] = id;
+            assigned["client_id"] = session->get_client_key();
+            assigned["name"] = session->get_client_name();
+            socket->sendText(assigned.dump());
+
             socket->setOnMessageCallback([this, session, id, socket](const ix::WebSocketMessagePtr& message) {
                 if (message->type == ix::WebSocketMessageType::Message && message->binary && !message->str.empty()) {
                     session->incoming_rb.write(message->str.data(), message->str.size());
@@ -1056,11 +1051,18 @@ bool WebServer::start() {
                     unsigned output = session->output_channels.load(std::memory_order_relaxed);
                     if (parse_identity_message(message->str, key, name, input, output)) {
                         if (!m_clientMgr.claim_identity(session, key, name)) {
-                            socket->sendText(nlohmann::json{{"type", "identity_conflict"}, {"client_id", key}}.dump());
+                            nlohmann::json conflict;
+                            conflict["type"] = "identity_conflict";
+                            conflict["client_id"] = key;
+                            socket->sendText(conflict.dump());
                         } else {
                             session->input_channels.store(std::clamp(input, 1u, CM5_MAX_CHANNELS), std::memory_order_relaxed);
                             session->output_channels.store(std::clamp(output, 1u, CM5_MAX_CHANNELS), std::memory_order_relaxed);
-                            socket->sendText(nlohmann::json{{"type", "identity_accepted"}, {"client_id", session->get_client_key()}, {"name", session->get_client_name()}}.dump());
+                            nlohmann::json accepted;
+                            accepted["type"] = "identity_accepted";
+                            accepted["client_id"] = session->get_client_key();
+                            accepted["name"] = session->get_client_name();
+                            socket->sendText(accepted.dump());
                         }
                     }
                 } else if (message->type == ix::WebSocketMessageType::Close) {

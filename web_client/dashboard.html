@@ -544,6 +544,9 @@
         let editingRouteId = null;
         let activeTabName = 'patchbay';
 
+        // Endpoint Map Lookup (Bypasses CSS special character selector bugs)
+        let endpointBlocks = new Map();
+
         // DSP Chain Local State for Route Inspector
         let currentRouteDspState = {
             active: false,
@@ -630,7 +633,7 @@
         function resetNodePositions() {
             localStorage.removeItem('cm5_node_positions');
             nodePositions = {};
-            document.querySelectorAll('.endpoint-block').forEach(b => {
+            endpointBlocks.forEach(b => {
                 b.style.transform = '';
             });
             isInitialFitDone = false;
@@ -886,10 +889,12 @@
             const destCont = $('destinations');
             const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
 
+            // Clean up removed endpoints from DOM and Map
             [srcCont, destCont].forEach(cont => {
                 Array.from(cont.children).forEach(child => {
                     const id = child.dataset.epId;
                     if (!currentEndpoints.has(id)) {
+                        endpointBlocks.delete(id);
                         child.style.opacity = '0';
                         child.style.transform = 'scale(0.8)';
                         setTimeout(() => child.remove(), 300);
@@ -897,8 +902,9 @@
                 });
             });
 
+            // Update or create blocks using endpointBlocks Map lookup
             graph.endpoints.forEach(ep => {
-                let block = $(`block-${CSS.escape(ep.id)}`);
+                let block = endpointBlocks.get(ep.id);
                 if (!block) {
                     block = createEndpointBlock(ep);
                     if (ep.direction === 'source') srcCont.appendChild(block);
@@ -974,6 +980,8 @@
 
                 block.appendChild(row);
             }
+
+            endpointBlocks.set(ep.id, block);
             return block;
         }
 
