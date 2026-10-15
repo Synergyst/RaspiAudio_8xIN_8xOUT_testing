@@ -122,8 +122,8 @@ private:
     double m_tonePhase = 0.0;
 
     inline float* get_buffer(NodeId id) {
-        if (id < 0 || id >= MAX_NODES) return nullptr;
-        return &m_nodeBufferPool[id * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
+        if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
+        return &m_nodeBufferPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
     }
 };
 

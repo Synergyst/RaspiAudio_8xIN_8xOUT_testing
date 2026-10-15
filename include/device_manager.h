@@ -1,7 +1,11 @@
 #ifndef DEVICE_MANAGER_H
 #define DEVICE_MANAGER_H
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
 #include "miniaudio.h"
+#pragma GCC diagnostic pop
+
 #include "constants.h"
 #include "ring_buffer.h"
 #include <string>
