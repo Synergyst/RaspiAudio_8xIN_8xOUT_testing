@@ -13,6 +13,7 @@ DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager,
     : m_deviceManager(deviceManager), m_clientManager(clientManager), m_metrics(metrics), m_tone(tone) {
     
     m_nodeBufferPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
+    m_routeScratchBuffer.resize(CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
     
     m_gainProc = std::make_unique<GainProcessor>(1.0f);
     m_compProc = std::make_unique<CompressorProcessor>(0.7f, 4.0f);
@@ -137,7 +138,6 @@ void DspEngine::rebuild_graph() {
         }
     }
 
-    // ROUTING OPTIMIZATION: Build Adjacency List
     m_currentRoutes = routes_ptr;
     for (size_t i = 0; i < MAX_NODES; ++i) {
         m_adjList[i].clear();
@@ -216,13 +216,31 @@ void DspEngine::process_audio() {
             }
         }
 
-        // OPTIMIZED ROUTING: Use Adjacency List instead of global scan
         if (node >= 0 && node < (int)MAX_NODES) {
             for (const auto* route : m_adjList[node]) {
                 float* dstBuf = get_buffer(route->destination_node);
                 if (dstBuf && route->source_channel < CM5_INTERNAL_WIDTH && route->destination_channel < CM5_INTERNAL_WIDTH) {
+                    
+                    // PER-ROUTE DSP IMPLEMENTATION
+                    // 1. Extract source channel into scratch buffer
+                    std::fill(m_routeScratchBuffer.begin(), m_routeScratchBuffer.end(), 0.0f);
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-                        dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += buf[f * CM5_INTERNAL_WIDTH + route->source_channel] * route->gain;
+                        m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] = buf[f * CM5_INTERNAL_WIDTH + route->source_channel];
+                    }
+
+                    // 2. Apply Route-Specific DSP Chain
+                    auto dspIt = m_routeDspMap.find(route->id);
+                    float currentGain = route->gain;
+                    if (dspIt != m_routeDspMap.end()) {
+                        for (auto& proc : dspIt->second.chain) {
+                            proc->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
+                        }
+                        currentGain = dspIt->second.gain;
+                    }
+
+                    // 3. Sum into destination buffer
+                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
+                        dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] * currentGain;
                     }
                 }
             }

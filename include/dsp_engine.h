@@ -119,6 +119,14 @@ private:
     std::shared_ptr<const std::vector<AudioRoute>> m_currentRoutes;
     std::vector<const AudioRoute*> m_adjList[MAX_NODES];
     
+    // Per-Route DSP
+    struct RouteDsp {
+        std::vector<std::unique_ptr<AudioProcessor>> chain;
+        float gain = 1.0f;
+    };
+    std::unordered_map<uint32_t, RouteDsp> m_routeDspMap;
+    std::vector<float> m_routeScratchBuffer;
+    
     std::unique_ptr<GainProcessor> m_gainProc;
     std::unique_ptr<CompressorProcessor> m_compProc;
     
