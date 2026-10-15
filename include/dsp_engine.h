@@ -79,6 +79,7 @@ struct NodeHandler {
     void* ptr; // Pointer to HardwareDevice or WebClientSession
     unsigned channels;
     std::string endpointId;
+    bool active = false;
 };
 
 class DspEngine {
@@ -115,8 +116,8 @@ private:
     std::vector<float> m_nextFeedbackPool;
     
     std::vector<NodeId> m_executionOrder;
-    std::unordered_map<NodeId, int> m_nodePosition;
-    std::unordered_map<NodeId, NodeHandler> m_nodeHandlers;
+    int m_nodePosition[MAX_NODES];
+    NodeHandler m_nodeHandlers[MAX_NODES];
     std::atomic<bool> m_graphDirty{true};
     
     // Routing Optimization

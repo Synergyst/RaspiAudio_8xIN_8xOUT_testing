@@ -105,16 +105,22 @@ void DspEngine::rebuild_graph() {
     }
 
     m_executionOrder = std::move(sortedNodes);
-    m_nodePosition.clear();
+    
+    std::fill(std::begin(m_nodePosition), std::end(m_nodePosition), -1);
     for (size_t i = 0; i < m_executionOrder.size(); ++i) {
-        m_nodePosition[m_executionOrder[i]] = (int)i;
+        NodeId node = m_executionOrder[i];
+        if (node >= 0 && node < (int)MAX_NODES) {
+            m_nodePosition[node] = (int)i;
+        }
     }
     
-    m_nodeHandlers.clear();
+    for (auto& h : m_nodeHandlers) h.active = false;
     for (NodeId node : m_executionOrder) {
+        if (node < 0 || node >= (int)MAX_NODES) continue;
+
         std::string endpoint = m_clientManager.get_endpoint_from_id(node);
         if (node == NODE_TONE_GENERATOR) {
-            m_nodeHandlers[node] = {NodeHandler::Type::TONE, nullptr, CM5_INTERNAL_WIDTH, "tone/generator"};
+            m_nodeHandlers[node] = {NodeHandler::Type::TONE, nullptr, CM5_INTERNAL_WIDTH, "tone/generator", true};
         } else if (endpoint.find("hardware/") == 0) {
             size_t firstSlash = 9; 
             size_t secondSlash = endpoint.find("/", firstSlash);
@@ -123,7 +129,7 @@ void DspEngine::rebuild_graph() {
                 bool isCapture = (endpoint.find("/capture") != std::string::npos);
                 for (auto& dev : activeDevices) {
                     if (std::string(dev->get_info().id.alsa) == id || dev->get_original_id() == id) {
-                        m_nodeHandlers[node] = {isCapture ? NodeHandler::Type::HARDWARE_CAPTURE : NodeHandler::Type::HARDWARE_PLAYBACK, dev.get(), dev->get_info().channels, endpoint};
+                        m_nodeHandlers[node] = {isCapture ? NodeHandler::Type::HARDWARE_CAPTURE : NodeHandler::Type::HARDWARE_PLAYBACK, dev.get(), dev->get_info().channels, endpoint, true};
                         break;
                     }
                 }
@@ -137,7 +143,7 @@ void DspEngine::rebuild_graph() {
                 auto sessions = m_clientManager.get_active_sessions();
                 for (auto& s : sessions) {
                     if (s->get_client_key() == key) {
-                        m_nodeHandlers[node] = {isCapture ? NodeHandler::Type::CLIENT_CAPTURE : NodeHandler::Type::CLIENT_PLAYBACK, s.get(), isCapture ? s->input_channels.load() : s->output_channels.load(), endpoint};
+                        m_nodeHandlers[node] = {isCapture ? NodeHandler::Type::CLIENT_CAPTURE : NodeHandler::Type::CLIENT_PLAYBACK, s.get(), isCapture ? s->input_channels.load() : s->output_channels.load(), endpoint, true};
                         break;
                     }
                 }
@@ -183,9 +189,8 @@ void DspEngine::process_audio() {
         float* buf = get_buffer(node);
         if (!buf) continue;
 
-        auto it = m_nodeHandlers.find(node);
-        if (it == m_nodeHandlers.end()) continue;
-        const NodeHandler& handler = it->second;
+        if (node < 0 || node >= (int)MAX_NODES || !m_nodeHandlers[node].active) continue;
+        const NodeHandler& handler = m_nodeHandlers[node];
 
         if (handler.type == NodeHandler::Type::TONE) {
             if (m_tone.enabled) {
@@ -229,9 +234,11 @@ void DspEngine::process_audio() {
                 if (dstBuf && route->source_channel < CM5_INTERNAL_WIDTH && route->destination_channel < CM5_INTERNAL_WIDTH) {
                     
                     bool isFeedback = false;
-                    if (m_nodePosition.count(node) && m_nodePosition.count(route->destination_node)) {
-                        if (m_nodePosition[node] >= m_nodePosition[route->destination_node]) {
-                            isFeedback = true;
+                    if (node >= 0 && node < (int)MAX_NODES && route->destination_node >= 0 && route->destination_node < (int)MAX_NODES) {
+                        if (m_nodePosition[node] != -1 && m_nodePosition[route->destination_node] != -1) {
+                            if (m_nodePosition[node] >= m_nodePosition[route->destination_node]) {
+                                isFeedback = true;
+                            }
                         }
                     }
 
