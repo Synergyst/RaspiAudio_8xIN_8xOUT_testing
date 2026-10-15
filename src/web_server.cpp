@@ -22,6 +22,15 @@
 
 namespace {
 
+// Internal cache to track DSP chain state for persistence since RouteDsp is owned by DspEngine
+struct RouteDspState {
+    bool active = false;
+    float gain = 1.0f;
+    std::vector<nlohmann::json> chain; // Stores { "type": "gain", "params": {...} }
+};
+std::unordered_map<uint32_t, RouteDspState> g_dspSettingsCache;
+std::mutex g_dspCacheLock;
+
 std::string json_escape(const std::string& value) {
     std::string result;
     result.reserve(value.size() + 8);
@@ -88,6 +97,20 @@ void append_meter_json(std::ostringstream& json, const std::array<ChannelMeter, 
              << "}" << (i + 1 == channels ? "" : ",");
     }
     json << ']';
+}
+
+// Factory for creating AudioProcessors from JSON definitions
+std::unique_ptr<AudioProcessor> create_processor(const std::string& type, const nlohmann::json& params) {
+    if (type == "gain") {
+        return std::make_unique<GainProcessor>(params.value("gain", 1.0f));
+    } else if (type == "compressor") {
+        return std::make_unique<CompressorProcessor>(
+            params.value("threshold", 0.5f), 
+            params.value("ratio", 4.0f)
+        );
+    } else {
+        return std::make_unique<PassthroughProcessor>();
+    }
 }
 
 } // namespace
@@ -317,14 +340,45 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                         !std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) continue;
                     routes.push_back(route);
                     nextId = std::max(nextId, route.id + 1);
+
+                    // --- LOAD DSP CHAIN ---
+                    if (m_dspEngine && value.contains("dsp") && value["dsp"].is_object()) {
+                        const auto& dsp = value["dsp"];
+                        uint32_t rId = route.id;
+                        
+                        RouteDspState state;
+                        state.active = dsp.value("active", false);
+                        state.gain = dsp.value("gain", 1.0f);
+                        if (dsp.contains("chain") && dsp["chain"].is_array()) {
+                            state.chain = dsp["chain"].get<std::vector<nlohmann::json>>();
+                        }
+                        
+                        {
+                            std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+                            g_dspSettingsCache[rId] = state;
+                        }
+
+                        std::vector<std::unique_ptr<AudioProcessor>> chain;
+                        if (dsp.contains("chain") && dsp["chain"].is_array()) {
+                            for (const auto& procJson : dsp["chain"]) {
+                                std::string type = procJson.value("type", "passthrough");
+                                nlohmann::json params = procJson.value("params", nlohmann::json::object());
+                                chain.push_back(create_processor(type, params));
+                            }
+                        }
+                        m_dspEngine->update_route_chain(rId, std::move(chain));
+                        m_dspEngine->set_route_dsp_active(rId, state.active);
+                        m_dspEngine->set_route_gain(rId, state.gain);
+                    }
                 }
             }
             std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
             m_next_route_id.store(nextId, std::memory_order_relaxed);
             m_known_client_names.clear();
             if (settings.contains("clients") && settings["clients"].is_object()) {
-                for (auto it = settings["clients"].begin(); it != settings["clients"].end(); ++it)
-                    if (it.value().is_string()) m_known_client_names[it.key()] = it.value().get<std::string>();
+                for (auto const& [key, name] : settings["clients"].items()) {
+                    if (name.is_string()) m_known_client_names[key] = name.get<std::string>();
+                }
             }
         }
         return true;
@@ -375,14 +429,28 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
         std::lock_guard<std::mutex> sessionLock(m_lock);
         settings["routes"] = nlohmann::json::array();
         for (const auto& route : *std::atomic_load(&m_routes)) {
-            settings["routes"].push_back({
-                {"id", route.id}, 
-                {"source", get_endpoint_from_id(route.source_node)}, 
-                {"source_channel", route.source_channel},
-                {"destination", get_endpoint_from_id(route.destination_node)}, 
-                {"destination_channel", route.destination_channel},
-                {"gain", route.gain}, {"enabled", route.enabled}
-            });
+            nlohmann::json rj;
+            rj["id"] = route.id;
+            rj["source"] = get_endpoint_from_id(route.source_node);
+            rj["source_channel"] = route.source_channel;
+            rj["destination"] = get_endpoint_from_id(route.destination_node);
+            rj["destination_channel"] = route.destination_channel;
+            rj["gain"] = route.gain;
+            rj["enabled"] = route.enabled;
+
+            // --- SAVE DSP CHAIN ---
+            {
+                std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+                if (g_dspSettingsCache.count(route.id)) {
+                    const auto& dsp = g_dspSettingsCache[route.id];
+                    rj["dsp"] = {
+                        {"active", dsp.active},
+                        {"gain", dsp.gain},
+                        {"chain", dsp.chain}
+                    };
+                }
+            }
+            settings["routes"].push_back(rj);
         }
         settings["clients"] = nlohmann::json::object();
         for (auto const& client : m_known_client_names) settings["clients"][client.first] = client.second;
@@ -430,7 +498,7 @@ bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) co
         endpoint.compare(endpoint.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
     const std::string key = endpoint.substr(prefix.size(), endpoint.size() - prefix.size() - suffix.size());
     if (key.empty()) return false;
-    for (const auto& session : m_sessions)
+    for (auto& session : m_sessions)
         if (session->get_client_key() == key && session->active.load(std::memory_order_relaxed)) return true;
     return m_known_client_names.find(key) != m_known_client_names.end();
 }
@@ -508,7 +576,7 @@ bool WebServer::start() {
             if (!ssl->is_valid()) { std::cerr << "[HTTP] Invalid TLS certificate/key" << std::endl; m_running = false; return; }
             m_httpServer = std::move(ssl);
         } else {
-            std::cerr << (m_plainText ? "[HTTP] Plain HTTP enabled" : "[HTTP] TLS certificate/key not found; serving plain HTTP") << std::endl;
+            std::cerr << (m_plainText ? "[HTTP] Plain HTTP enabled" : "[HTTP] TLS certificate not found; serving plain HTTP") << std::endl;
             m_httpServer = std::make_unique<httplib::Server>();
         }
         m_httpServer->set_mount_point("/client", "./web_client");
@@ -534,13 +602,13 @@ bool WebServer::start() {
             std::ostringstream contents;
             contents << privateKey.rdbuf();
             response.set_header("Content-Disposition", "attachment; filename=server.key");
-            response.set_content(contents.str(), "application/x-pem-key");
+            response.set_content(contents.str(), "application/x-pem-private-key");
         });
         m_httpServer->Get("/server.p12", [p12Path](const httplib::Request&, httplib::Response& response) {
             std::ifstream bundle(p12Path, std::ios::in | std::ios::binary);
             if (!bundle) {
                 response.status = 404;
-                response.set_content("PKCS#12 bundle unavailable; run setup.sh first", "text/plain; charset=UTF-8");
+                response.set_content("PKCS#12 bundle unavailable", "text/plain; charset=UTF-8");
                 return;
             }
             std::ostringstream contents;
@@ -694,7 +762,7 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) {
                 response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}","application/json");
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
             }
         });
 
@@ -729,7 +797,7 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& e) {
                 response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}","application/json");
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
             }
         });
 
@@ -777,7 +845,7 @@ bool WebServer::start() {
             }
             for (const auto& known : m_clientMgr.known_client_names()) {
                 bool active = false;
-                for (const auto& s : sessions) active = active || s->get_client_key() == known.first;
+                for (auto& s : sessions) active = active || s->get_client_key() == known.first;
                 if (active) continue;
                 endpoints.push_back({{"id", "client/" + known.first + "/capture"}, {"name", known.second}, {"connected", false}, {"direction", "source"}, {"channels", 1}});
                 endpoints.push_back({{"id", "client/" + known.first + "/playback"}, {"name", known.second}, {"connected", false}, {"direction", "destination"}, {"channels", 2}});
@@ -813,18 +881,19 @@ bool WebServer::start() {
             uint32_t id = 0; std::string error;
             if (!m_clientMgr.add_route(std::move(route), id, error)) {
                 response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}","application/json");
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}", "application/json");
                 return;
             }
             response.set_content("{\"status\":\"ok\",\"id\":" + std::to_string(id) + "}", "application/json");
         });
+
         m_httpServer->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
-            const uint32_t id = query_uint(request, "id", 0);
-            uint32_t routeId = id;
-            if (request.matches.size() > 1) { try { routeId = static_cast<uint32_t>(std::stoul(request.matches[1])); } catch (...) {} }
+            uint32_t routeId = 0;
+            if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
             if (!m_clientMgr.remove_route(routeId)) { response.status = 404; response.set_content("{\"status\":\"error\"}", "application/json"); return; }
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
+
         m_httpServer->Post("/api/routes/update", [this](const httplib::Request& request, httplib::Response& response) {
             const uint32_t id = query_uint(request, "id", 0);
             if (!id || !m_clientMgr.update_route(id, query_float(request, "gain", 1.0f), query_bool(request, "enabled", true))) {
@@ -832,13 +901,76 @@ bool WebServer::start() {
             }
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
+
+        // --- NEW: ROUTE DSP CONTROL PLANE ---
+
+        m_httpServer->Get(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t routeId = 0;
+            if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
+            if (routeId == 0) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"invalid route id\"}", "application/json"); return; }
+
+            std::lock_guard<std::mutex> lock(g_dspCacheLock);
+            if (g_dspSettingsCache.count(routeId)) {
+                const auto& s = g_dspSettingsCache[routeId];
+                nlohmann::json j;
+                j["active"] = s.active;
+                j["gain"] = s.gain;
+                j["chain"] = s.chain;
+                response.set_content(j.dump(2), "application/json");
+            } else {
+                response.set_content("{\"active\":false,\"gain\":1.0,\"chain\":[]}", "application/json");
+            }
+        });
+
+        m_httpServer->Post(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t routeId = 0;
+            if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
+            if (routeId == 0) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"invalid route id\"}", "application/json"); return; }
+
+            try {
+                auto body = nlohmann::json::parse(request.body);
+                bool active = body.value("active", false);
+                float gain = body.value("gain", 1.0f);
+                
+                std::vector<std::unique_ptr<AudioProcessor>> chain;
+                std::vector<nlohmann::json> chainJson;
+
+                if (body.contains("chain") && body["chain"].is_array()) {
+                    for (const auto& proc : body["chain"]) {
+                        std::string type = proc.value("type", "passthrough");
+                        nlohmann::json params = proc.value("params", nlohmann::json::object());
+                        chain.push_back(create_processor(type, params));
+                        chainJson.push_back({{"type", type}, {"params", params}});
+                    }
+                }
+
+                // Update Engine
+                m_dspEngine.set_route_dsp_active(routeId, active);
+                m_dspEngine.set_route_gain(routeId, gain);
+                m_dspEngine.update_route_chain(routeId, std::move(chain));
+
+                // Update Cache for persistence
+                {
+                    std::lock_guard<std::mutex> lock(g_dspCacheLock);
+                    g_dspSettingsCache[routeId] = { active, gain, chainJson };
+                }
+
+                response.set_content("{\"status\":\"ok\"}", "application/json");
+            } catch (const std::exception& e) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
+            }
+        });
+
         m_httpServer->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
             if (!m_clientMgr.save_settings(m_controls, m_tone)) {
-                response.status = 500; response.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
+                response.status = 500;
+                response.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
                 return;
             }
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
+
         m_httpServer->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
@@ -853,8 +985,12 @@ bool WebServer::start() {
                 }
                 if (request.has_param("mute")) bank[channel].mute.store(request.get_param_value("mute") == "1");
                 response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}","application/json"); }
+            } catch (const std::exception& error) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
+            }
         });
+
         m_httpServer->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 if (request.has_param("all")) {
@@ -874,10 +1010,14 @@ bool WebServer::start() {
                     bank[channel].clipped.store(false); bank[channel].peak_hold_db.store(-60.0f);
                 }
                 response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& error) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}","application/json"); }
+            } catch (const std::exception& error) {
+                response.status = 400;
+                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
+            }
         });
+
         m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html"); });
-        std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://" << "0.0.0.0:" << m_httpPort << std::endl;
+        std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://0.0.0.0:" << m_httpPort << std::endl;
         m_httpServer->listen("0.0.0.0", m_httpPort);
     });
 

@@ -35,6 +35,40 @@ void DspEngine::stop() {
     if (m_workerThread.joinable()) m_workerThread.join();
 }
 
+void DspEngine::set_route_dsp_active(uint32_t routeId, bool active) {
+    if (routeId < MAX_ROUTES) {
+        m_routeDsp[routeId].active.store(active, std::memory_order_release);
+    }
+}
+
+void DspEngine::set_route_gain(uint32_t routeId, float gain) {
+    if (routeId < MAX_ROUTES) {
+        m_routeDsp[routeId].gain.store(gain, std::memory_order_release);
+    }
+}
+
+void DspEngine::update_route_chain(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain) {
+    if (routeId >= MAX_ROUTES) return;
+
+    RouteDsp& rdsp = m_routeDsp[routeId];
+    int write_idx = 1 - rdsp.current_idx.load(std::memory_order_relaxed);
+    
+    // Clear the write buffer
+    for (unsigned i = 0; i < CM5_MAX_PROCESSORS_PER_ROUTE; ++i) {
+        rdsp.chain[write_idx][i] = nullptr;
+    }
+
+    // Populate new chain
+    int len = std::min((int)newChain.size(), (int)CM5_MAX_PROCESSORS_PER_ROUTE);
+    for (int i = 0; i < len; ++i) {
+        rdsp.chain[write_idx][i] = std::move(newChain[i]);
+    }
+
+    // Commit changes atomically
+    rdsp.length.store(len, std::memory_order_release);
+    rdsp.current_idx.store(write_idx, std::memory_order_release);
+}
+
 void DspEngine::update_meters(float* buffer, unsigned channels, const std::string& endpointId, bool isCapture) {
     if (!buffer) return;
     
@@ -259,15 +293,19 @@ void DspEngine::process_audio() {
                         m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
                     }
 
-                    // HARDENED ROUTE DSP LOOKUP: Direct array indexing instead of map
+                    // HARDENED ROUTE DSP LOOKUP
                     float currentGain = route->gain;
                     if (route->id >= 0 && (size_t)route->id < MAX_ROUTES) {
                         RouteDsp& rdsp = m_routeDsp[route->id];
-                        if (rdsp.active) {
-                            for (auto& proc : rdsp.chain) {
-                                proc->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
+                        if (rdsp.active.load(std::memory_order_acquire)) {
+                            int idx = rdsp.current_idx.load(std::memory_order_acquire);
+                            int len = rdsp.length.load(std::memory_order_acquire);
+                            for (int i = 0; i < len; ++i) {
+                                if (rdsp.chain[idx][i]) {
+                                    rdsp.chain[idx][i]->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
+                                }
                             }
-                            currentGain = rdsp.gain;
+                            currentGain = rdsp.gain.load(std::memory_order_acquire);
                         }
                     }
 

@@ -3,6 +3,7 @@
 
 #include "device_manager.h"
 #include "web_server.h"
+#include "constants.h"
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -19,6 +20,14 @@ class AudioProcessor {
 public:
     virtual ~AudioProcessor() = default;
     virtual void process(float* buffer, size_t frames, unsigned channels) = 0;
+};
+
+// Passthrough Processor (Placeholder/Framework baseline)
+class PassthroughProcessor : public AudioProcessor {
+public:
+    void process(float* buffer, size_t frames, unsigned channels) override {
+        // No-op: passes signal through unchanged
+    }
 };
 
 // Simple Gain Processor
@@ -94,6 +103,11 @@ public:
     GainProcessor* get_gain_processor() { return m_gainProc.get(); }
     CompressorProcessor* get_compressor() { return m_compProc.get(); }
 
+    // Thread-safe route DSP management
+    void set_route_dsp_active(uint32_t routeId, bool active);
+    void set_route_gain(uint32_t routeId, float gain);
+    void update_route_chain(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain);
+
 private:
     void processing_loop();
     void process_audio();
@@ -125,11 +139,21 @@ private:
     std::shared_ptr<const std::vector<AudioRoute>> m_currentRoutes;
     std::vector<const AudioRoute*> m_adjList[MAX_NODES];
     
-    // Per-Route DSP (Hardened)
+    // Per-Route DSP (Hardened Double-Buffering)
     struct RouteDsp {
-        std::vector<std::unique_ptr<AudioProcessor>> chain;
-        float gain = 1.0f;
-        bool active = false;
+        // Double buffer to allow lock-free updates. 
+        // Audio thread reads from current_idx, Control thread writes to 1-current_idx.
+        std::unique_ptr<AudioProcessor> chain[2][CM5_MAX_PROCESSORS_PER_ROUTE];
+        std::atomic<int> current_idx{0};
+        std::atomic<int> length{0};
+        std::atomic<float> gain{1.0f};
+        std::atomic<bool> active{false};
+
+        RouteDsp() {
+            for(int i=0; i<2; ++i)
+                for(unsigned j=0; j<CM5_MAX_PROCESSORS_PER_ROUTE; ++j)
+                    chain[i][j] = nullptr;
+        }
     };
     RouteDsp m_routeDsp[MAX_ROUTES];
     std::vector<float> m_routeScratchBuffer;
