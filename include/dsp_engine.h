@@ -115,6 +115,10 @@ private:
     std::unordered_map<NodeId, NodeHandler> m_nodeHandlers;
     std::atomic<bool> m_graphDirty{true};
     
+    // Routing Optimization
+    std::shared_ptr<const std::vector<AudioRoute>> m_currentRoutes;
+    std::vector<const AudioRoute*> m_adjList[MAX_NODES];
+    
     std::unique_ptr<GainProcessor> m_gainProc;
     std::unique_ptr<CompressorProcessor> m_compProc;
     

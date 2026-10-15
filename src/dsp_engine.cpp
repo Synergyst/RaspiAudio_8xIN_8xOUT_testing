@@ -78,7 +78,6 @@ void DspEngine::rebuild_graph() {
 
     auto activeDevices = m_deviceManager.get_active_devices();
     for (auto& dev : activeDevices) {
-        // FIX: Use original_id to match the logical NodeIds registered in ClientManager
         std::string origId = dev->get_original_id();
         NodeId captureId = m_clientManager.get_node_id("hardware/" + origId + "/capture");
         NodeId playbackId = m_clientManager.get_node_id("hardware/" + origId + "/playback");
@@ -138,6 +137,17 @@ void DspEngine::rebuild_graph() {
         }
     }
 
+    // ROUTING OPTIMIZATION: Build Adjacency List
+    m_currentRoutes = routes_ptr;
+    for (size_t i = 0; i < MAX_NODES; ++i) {
+        m_adjList[i].clear();
+    }
+    for (const auto& route : routes) {
+        if (route.source_node >= 0 && route.source_node < (int)MAX_NODES && route.enabled) {
+            m_adjList[route.source_node].push_back(&route);
+        }
+    }
+
     m_graphDirty.store(false, std::memory_order_release);
 }
 
@@ -158,9 +168,7 @@ void DspEngine::process_audio() {
         rebuild_graph();
     }
 
-    const auto routes_ptr = m_clientManager.route_snapshot();
-    if (!routes_ptr) return;
-    const auto& routes = *routes_ptr;
+    if (!m_currentRoutes) return;
 
     std::fill(m_nodeBufferPool.begin(), m_nodeBufferPool.end(), 0.0f);
 
@@ -208,12 +216,13 @@ void DspEngine::process_audio() {
             }
         }
 
-        for (const auto& route : routes) {
-            if (route.source_node == node && route.enabled) {
-                float* dstBuf = get_buffer(route.destination_node);
-                if (dstBuf && route.source_channel < CM5_INTERNAL_WIDTH && route.destination_channel < CM5_INTERNAL_WIDTH) {
+        // OPTIMIZED ROUTING: Use Adjacency List instead of global scan
+        if (node >= 0 && node < (int)MAX_NODES) {
+            for (const auto* route : m_adjList[node]) {
+                float* dstBuf = get_buffer(route->destination_node);
+                if (dstBuf && route->source_channel < CM5_INTERNAL_WIDTH && route->destination_channel < CM5_INTERNAL_WIDTH) {
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-                        dstBuf[f * CM5_INTERNAL_WIDTH + route.destination_channel] += buf[f * CM5_INTERNAL_WIDTH + route.source_channel] * route.gain;
+                        dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += buf[f * CM5_INTERNAL_WIDTH + route->source_channel] * route->gain;
                     }
                 }
             }
