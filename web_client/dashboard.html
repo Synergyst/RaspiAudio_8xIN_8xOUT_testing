@@ -561,6 +561,9 @@
         let wiringSource = null;
         let snappedDestination = null;
 
+        // High-Performance Meter Cache (Fixes DOM Thrashing)
+        let cachedMeters = [];
+
         // Isolated Pan & Zoom State
         let scale = 1.0;
         let panX = 0;
@@ -865,6 +868,19 @@
             $('status').textContent = 'Connected';
         }
 
+        function rebuildMeterCache() {
+            cachedMeters = [];
+            graph.endpoints.forEach(ep => {
+                for (let i = 0; i < ep.channels; i++) {
+                    const fill = document.getElementById(`vu-${ep.id}-${i}`);
+                    const peak = document.getElementById(`peak-${ep.id}-${i}`);
+                    if (fill) {
+                        cachedMeters.push({ epId: ep.id, ch: i, fillEl: fill, peakEl: peak });
+                    }
+                }
+            });
+        }
+
         function renderPatchbay() {
             const srcCont = $('sources');
             const destCont = $('destinations');
@@ -891,6 +907,8 @@
                     block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
                 }
             });
+
+            rebuildMeterCache();
 
             if (activeTabName === 'patchbay') {
                 setTimeout(drawCables, 50);
@@ -974,7 +992,18 @@
 
         async function createRoute(srcId, srcCh, destId, destCh) {
             try {
-                await fetchAPI(`/api/routes?source=${encodeURIComponent(srcId)}&source_ch=${srcCh}&destination=${encodeURIComponent(destId)}&destination_ch=${destCh}&gain=1&enabled=1`, { method: 'POST' });
+                await fetchAPI('/api/routes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source: srcId,
+                        source_ch: srcCh,
+                        destination: destId,
+                        destination_ch: destCh,
+                        gain: 1.0,
+                        enabled: true
+                    })
+                });
                 await loadGraph();
             } catch (e) {
                 alert('Routing failed: ' + e.message);
@@ -1164,35 +1193,22 @@
         async function updateMeters() {
             try {
                 const data = await fetchAPI('/api/meters');
-                const allVuFills = document.querySelectorAll('.vu-fill');
-
-                allVuFills.forEach(fill => {
-                    const id = fill.id;
-                    const lastDash = id.lastIndexOf('-');
-                    if (lastDash === -1) return;
-
-                    const epId = id.substring(3, lastDash);
-                    const chIdx = parseInt(id.substring(lastDash + 1));
-
+                cachedMeters.forEach(m => {
                     let meter = null;
-                    if (epId.includes('/capture')) {
-                        if (data.capture && data.capture[epId] && data.capture[epId][chIdx]) {
-                            meter = data.capture[epId][chIdx];
+                    if (m.epId.includes('/capture')) {
+                        if (data.capture && data.capture[m.epId] && data.capture[m.epId][m.ch]) {
+                            meter = data.capture[m.epId][m.ch];
                         }
-                    } else if (epId.includes('/playback')) {
-                        if (data.playback && data.playback[epId] && data.playback[ndIdx]) { // fallback
-                            // handled below
-                        }
-                        if (data.playback && data.playback[epId] && data.playback[epId][chIdx]) {
-                            meter = data.playback[epId][chIdx];
+                    } else if (m.epId.includes('/playback')) {
+                        if (data.playback && data.playback[m.epId] && data.playback[m.epId][m.ch]) {
+                            meter = data.playback[m.epId][m.ch];
                         }
                     }
 
                     if (meter) {
-                        const peakEl = document.getElementById(`peak-${epId}-${chIdx}`);
                         const width = Math.max(0, Math.min(100, (meter.rms_db + 60) * 100 / 60)) + '%';
-                        fill.style.width = width;
-                        if (peakEl) peakEl.classList.toggle('active', meter.clipped);
+                        m.fillEl.style.width = width;
+                        if (m.peakEl) m.peakEl.classList.toggle('active', meter.clipped);
                     }
                 });
             } catch (e) { console.error("Meter update error:", e); }
@@ -1214,10 +1230,18 @@
         async function saveSettings() { try { await fetchAPI('/api/settings/save', { method: 'POST' }); alert('Settings Saved'); } catch (e) { alert(e.message); } }
         async function refreshAll() { await Promise.all([loadGraph(), loadDevices()]); }
 
+        // Setup ResizeObserver to replace arbitrary timeouts and ensure cables redraw when layout settles
+        const viewportObserver = new ResizeObserver(() => {
+            drawCables();
+        });
+
         window.onresize = drawCables;
         setInterval(updateMeters, 100);
 
         async function init() {
+            const viewport = $('patchbay-viewport');
+            if (viewport) viewportObserver.observe(viewport);
+
             Promise.allSettled([
                 loadDevices(),
                 loadGraph()

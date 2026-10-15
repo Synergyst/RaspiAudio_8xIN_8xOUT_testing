@@ -82,6 +82,14 @@ std::string read_dashboard() {
     return contents.str();
 }
 
+std::string read_favicon() {
+    std::ifstream file("./web_client/favicon.ico", std::ios::in | std::ios::binary);
+    if (!file) return ""; // Return an empty string on failure for binary files
+    std::ostringstream contents;
+    contents << file.rdbuf();
+    return contents.str();
+}
+
 void append_meter_json(std::ostringstream& json, const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters, unsigned channels) {
     channels = std::min(channels, CM5_MAX_CHANNELS);
     json << '[';
@@ -1015,6 +1023,8 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
             }
         });
+
+        m_httpServer->Get("/favicon.ico", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_favicon(), "image/x-icon"); });
 
         m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html"); });
         std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://0.0.0.0:" << m_httpPort << std::endl;
