@@ -149,6 +149,11 @@ void DspEngine::rebuild_graph() {
                 }
             }
         }
+        
+        // FINAL STEP: Any node in the DAG not mapped to a physical source is a Virtual Node
+        if (!m_nodeHandlers[node].active) {
+            m_nodeHandlers[node] = {NodeHandler::Type::VIRTUAL, nullptr, CM5_INTERNAL_WIDTH, "virtual/" + std::to_string(node), true};
+        }
     }
 
     m_currentRoutes = routes_ptr;
@@ -192,6 +197,7 @@ void DspEngine::process_audio() {
         if (node < 0 || node >= (int)MAX_NODES || !m_nodeHandlers[node].active) continue;
         const NodeHandler& handler = m_nodeHandlers[node];
 
+        // Node Source Phase: Only Physical/Tone nodes generate audio. Virtual nodes are purely summative.
         if (handler.type == NodeHandler::Type::TONE) {
             if (m_tone.enabled) {
                 float freq = m_tone.frequency_hz;
@@ -228,6 +234,7 @@ void DspEngine::process_audio() {
             }
         }
 
+        // Routing Phase
         if (node >= 0 && node < (int)MAX_NODES) {
             for (const auto* route : m_adjList[node]) {
                 float* dstBuf = get_buffer(route->destination_node);
@@ -252,13 +259,16 @@ void DspEngine::process_audio() {
                         m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
                     }
 
-                    auto dspIt = m_routeDspMap.find(route->id);
+                    // HARDENED ROUTE DSP LOOKUP: Direct array indexing instead of map
                     float currentGain = route->gain;
-                    if (dspIt != m_routeDspMap.end()) {
-                        for (auto& proc : dspIt->second.chain) {
-                            proc->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
+                    if (route->id >= 0 && (size_t)route->id < MAX_ROUTES) {
+                        RouteDsp& rdsp = m_routeDsp[route->id];
+                        if (rdsp.active) {
+                            for (auto& proc : rdsp.chain) {
+                                proc->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
+                            }
+                            currentGain = rdsp.gain;
                         }
-                        currentGain = dspIt->second.gain;
                     }
 
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
@@ -268,6 +278,7 @@ void DspEngine::process_audio() {
             }
         }
 
+        // Playback Phase
         if (handler.type == NodeHandler::Type::HARDWARE_PLAYBACK) {
             auto* dev = static_cast<HardwareDevice*>(handler.ptr);
             m_gainProc->process(buf, CM5_BUFFER_FRAMES, CM5_INTERNAL_WIDTH);

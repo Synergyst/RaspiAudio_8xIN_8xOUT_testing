@@ -74,7 +74,7 @@ private:
 
 // Mapping of NodeId to its physical handler
 struct NodeHandler {
-    enum class Type { HARDWARE_CAPTURE, HARDWARE_PLAYBACK, CLIENT_CAPTURE, CLIENT_PLAYBACK, TONE };
+    enum class Type { HARDWARE_CAPTURE, HARDWARE_PLAYBACK, CLIENT_CAPTURE, CLIENT_PLAYBACK, TONE, VIRTUAL };
     Type type;
     void* ptr; // Pointer to HardwareDevice or WebClientSession
     unsigned channels;
@@ -109,6 +109,7 @@ private:
     
     // Real-time Hardening State
     static constexpr size_t MAX_NODES = 256;
+    static constexpr size_t MAX_ROUTES = 1024;
     
     // Pre-allocated buffer pool: [NodeId][Frame * Channel]
     std::vector<float> m_nodeBufferPool;
@@ -124,12 +125,13 @@ private:
     std::shared_ptr<const std::vector<AudioRoute>> m_currentRoutes;
     std::vector<const AudioRoute*> m_adjList[MAX_NODES];
     
-    // Per-Route DSP
+    // Per-Route DSP (Hardened)
     struct RouteDsp {
         std::vector<std::unique_ptr<AudioProcessor>> chain;
         float gain = 1.0f;
+        bool active = false;
     };
-    std::unordered_map<uint32_t, RouteDsp> m_routeDspMap;
+    RouteDsp m_routeDsp[MAX_ROUTES];
     std::vector<float> m_routeScratchBuffer;
     
     std::unique_ptr<GainProcessor> m_gainProc;
