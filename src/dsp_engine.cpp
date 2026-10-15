@@ -8,11 +8,14 @@
 #include <unordered_set>
 #include <string>
 #include <queue>
+#include <cstring>
 
 DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone) 
     : m_deviceManager(deviceManager), m_clientManager(clientManager), m_metrics(metrics), m_tone(tone) {
     
     m_nodeBufferPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
+    m_feedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
+    m_nextFeedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
     m_routeScratchBuffer.resize(CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
     
     m_gainProc = std::make_unique<GainProcessor>(1.0f);
@@ -102,6 +105,10 @@ void DspEngine::rebuild_graph() {
     }
 
     m_executionOrder = std::move(sortedNodes);
+    m_nodePosition.clear();
+    for (size_t i = 0; i < m_executionOrder.size(); ++i) {
+        m_nodePosition[m_executionOrder[i]] = (int)i;
+    }
     
     m_nodeHandlers.clear();
     for (NodeId node : m_executionOrder) {
@@ -221,14 +228,23 @@ void DspEngine::process_audio() {
                 float* dstBuf = get_buffer(route->destination_node);
                 if (dstBuf && route->source_channel < CM5_INTERNAL_WIDTH && route->destination_channel < CM5_INTERNAL_WIDTH) {
                     
-                    // PER-ROUTE DSP IMPLEMENTATION
-                    // 1. Extract source channel into scratch buffer
-                    std::fill(m_routeScratchBuffer.begin(), m_routeScratchBuffer.end(), 0.0f);
-                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-                        m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] = buf[f * CM5_INTERNAL_WIDTH + route->source_channel];
+                    bool isFeedback = false;
+                    if (m_nodePosition.count(node) && m_nodePosition.count(route->destination_node)) {
+                        if (m_nodePosition[node] >= m_nodePosition[route->destination_node]) {
+                            isFeedback = true;
+                        }
                     }
 
-                    // 2. Apply Route-Specific DSP Chain
+                    float* srcData = buf;
+                    if (isFeedback) {
+                        srcData = get_feedback_buffer(node);
+                    }
+
+                    std::fill(m_routeScratchBuffer.begin(), m_routeScratchBuffer.end(), 0.0f);
+                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
+                        m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
+                    }
+
                     auto dspIt = m_routeDspMap.find(route->id);
                     float currentGain = route->gain;
                     if (dspIt != m_routeDspMap.end()) {
@@ -238,7 +254,6 @@ void DspEngine::process_audio() {
                         currentGain = dspIt->second.gain;
                     }
 
-                    // 3. Sum into destination buffer
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
                         dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] * currentGain;
                     }
@@ -270,5 +285,12 @@ void DspEngine::process_audio() {
             s->outgoing_rb.write(s->io_buffer.data(), CM5_BUFFER_FRAMES * chs * sizeof(float));
             update_meters(buf, chs, handler.endpointId, false);
         }
+
+        float* nextFb = get_next_feedback_buffer(node);
+        if (nextFb) {
+            std::memcpy(nextFb, buf, CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH * sizeof(float));
+        }
     }
+
+    std::swap(m_feedbackPool, m_nextFeedbackPool);
 }

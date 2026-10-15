@@ -111,7 +111,11 @@ private:
     
     // Pre-allocated buffer pool: [NodeId][Frame * Channel]
     std::vector<float> m_nodeBufferPool;
+    std::vector<float> m_feedbackPool;
+    std::vector<float> m_nextFeedbackPool;
+    
     std::vector<NodeId> m_executionOrder;
+    std::unordered_map<NodeId, int> m_nodePosition;
     std::unordered_map<NodeId, NodeHandler> m_nodeHandlers;
     std::atomic<bool> m_graphDirty{true};
     
@@ -136,6 +140,16 @@ private:
     inline float* get_buffer(NodeId id) {
         if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
         return &m_nodeBufferPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
+    }
+    
+    inline float* get_feedback_buffer(NodeId id) {
+        if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
+        return &m_feedbackPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
+    }
+
+    inline float* get_next_feedback_buffer(NodeId id) {
+        if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
+        return &m_nextFeedbackPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
     }
 };
 
