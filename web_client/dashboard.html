@@ -213,8 +213,9 @@
             position: absolute;
             top: 0;
             left: 0;
-            width: 5000px;
-            height: 5000px;
+            width: 100%;
+            height: 100%;
+            overflow: visible;
             pointer-events: none;
             z-index: 1;
         }
@@ -431,7 +432,7 @@
             </div>
             <div id="patchbay">
                 <div id="patchbay-viewport">
-                    <svg id="cable-svg">
+                    <svg id="cable-svg" width="100%" height="100%" style="overflow: visible;">
                         <path id="temp-cable" class="temp-cable" d="" style="display: none;"></path>
                     </svg>
                     <div class="column" id="sources"></div>
@@ -544,30 +545,30 @@
         let editingRouteId = null;
         let activeTabName = 'patchbay';
 
-        // Endpoint Map Lookup (Bypasses CSS special character selector bugs)
+        // Endpoint Map Lookup
         let endpointBlocks = new Map();
 
-        // DSP Chain Local State for Route Inspector
+        // DSP Chain Local State
         let currentRouteDspState = {
             active: false,
             gain: 1.0,
             chain: []
         };
 
-        // Node Positions (Draggable Windows) State
+        // Node Positions State
         let nodePositions = JSON.parse(localStorage.getItem('cm5_node_positions') || '{}');
         let activeDraggedNode = null;
         let nodeDragStart = { mouseX: 0, mouseY: 0, startX: 0, startY: 0 };
 
-        // Desktop Drag-to-Wire State
+        // Drag-to-Wire State
         let isWiringDrag = false;
         let wiringSource = null;
         let snappedDestination = null;
 
-        // High-Performance Meter Cache (Fixes DOM Thrashing)
+        // Meter Cache
         let cachedMeters = [];
 
-        // Isolated Pan & Zoom State
+        // Pan & Zoom State
         let scale = 1.0;
         let panX = 0;
         let panY = 0;
@@ -889,7 +890,6 @@
             const destCont = $('destinations');
             const currentEndpoints = new Set(graph.endpoints.map(e => e.id));
 
-            // Clean up removed endpoints from DOM and Map
             [srcCont, destCont].forEach(cont => {
                 Array.from(cont.children).forEach(child => {
                     const id = child.dataset.epId;
@@ -902,7 +902,6 @@
                 });
             });
 
-            // Update or create blocks using endpointBlocks Map lookup
             graph.endpoints.forEach(ep => {
                 let block = endpointBlocks.get(ep.id);
                 if (!block) {
@@ -1004,10 +1003,10 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        source: srcId,
-                        source_ch: srcCh,
-                        destination: destId,
-                        destination_ch: destCh,
+                        source_node: srcId,
+                        source_channel: srcCh,
+                        destination_node: destId,
+                        destination_channel: destCh,
                         gain: 1.0,
                         enabled: true
                     })
@@ -1021,9 +1020,9 @@
         function drawCables() {
             if (activeTabName !== 'patchbay') return;
             const svg = $('cable-svg');
-            const tempCable = $('temp-cable');
-            svg.innerHTML = '';
-            if (tempCable) svg.appendChild(tempCable);
+            
+            const cables = svg.querySelectorAll('.cable');
+            cables.forEach(c => c.remove());
 
             const viewportRect = $('patchbay-viewport').getBoundingClientRect();
 
@@ -1238,7 +1237,6 @@
         async function saveSettings() { try { await fetchAPI('/api/settings/save', { method: 'POST' }); alert('Settings Saved'); } catch (e) { alert(e.message); } }
         async function refreshAll() { await Promise.all([loadGraph(), loadDevices()]); }
 
-        // Setup ResizeObserver to replace arbitrary timeouts and ensure cables redraw when layout settles
         const viewportObserver = new ResizeObserver(() => {
             drawCables();
         });
