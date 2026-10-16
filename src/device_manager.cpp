@@ -8,15 +8,24 @@
 #include <thread>
 #include <chrono>
 
+// CONFIGURATION
+#define CM5_RB_SIZE_MS 120           // Total ring buffer size in milliseconds
+#define CM5_ENABLE_PROBES 0         // Set to 1 to enable console signal tracing
+
+#if CM5_ENABLE_PROBES
 std::atomic<float> g_callbackPeak{0.0f};
 std::atomic<bool> g_monitorRunning{false};
 std::atomic<uint32_t> g_callbackCount{0};
+#endif
 
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
     : m_info(info), m_context(context), m_originalId(originalId) {
-    ma_uint32 bufferFrames = m_info.sample_rate * 2; 
+    
+    ma_uint32 bufferFrames = (m_info.sample_rate * CM5_RB_SIZE_MS) / 1000;
+    
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
+    
     io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
 }
 
@@ -64,16 +73,16 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
     auto* device = static_cast<HardwareDevice*>(pDevice->pUserData);
     if (device->m_info.is_capture && pInput) {
         size_t written = device->m_input_rb.write(pInput, frameCount * device->m_info.channels * sizeof(float));
+        #if CM5_ENABLE_PROBES
         if (g_callbackCount.fetch_add(1) % 100 == 0) {
             std::cout << "[PROBE A] Capture Callback " << device->m_originalId << " wrote " << written << " bytes" << std::endl;
         }
+        #endif
     } else if (!device->m_info.is_capture && pOutput) {
-        if (device->m_output_rb.get_fill_level() < 0.05f) {
-            std::memset(pOutput, 0, frameCount * device->m_info.channels * sizeof(float));
-            return;
-        }
         size_t bytesNeeded = frameCount * device->m_info.channels * sizeof(float);
         size_t got = device->m_output_rb.read(pOutput, bytesNeeded);
+        
+        #if CM5_ENABLE_PROBES
         if (got > 0) {
             float* samples = static_cast<float*>(pOutput);
             size_t numSamples = got / sizeof(float);
@@ -85,15 +94,17 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
             float current = g_callbackPeak.load();
             if (localPeak > current) g_callbackPeak.store(localPeak);
         }
-        if (got < bytesNeeded) std::memset((uint8_t*)pOutput + got, 0, bytesNeeded - got);
         if (g_callbackCount.fetch_add(1) % 100 == 0) {
-            std::cout << "[PROBE D] Playback Callback " << device->m_originalId << " read " << got << "/" << bytesNeeded << " bytes | Peak: " << (got > 0 ? "Moving" : "Silent") << std::endl;
+            std::cout << "[PROBE D] Playback Callback " << device->m_originalId << " read " << got << "/" << bytesNeeded << " bytes" << std::endl;
         }
+        #endif
+        if (got < bytesNeeded) std::memset((uint8_t*)pOutput + got, 0, bytesNeeded - got);
     }
 }
 
 DeviceManager::DeviceManager() {
     if (ma_context_init(NULL, 0, NULL, &m_context) != MA_SUCCESS) std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
+    #if CM5_ENABLE_PROBES
     g_monitorRunning = true;
     std::thread([]() {
         while (g_monitorRunning) {
@@ -102,10 +113,13 @@ DeviceManager::DeviceManager() {
             std::cout << "[DEBUG] HW Callback Peak: " << peak << (peak > 0 ? " <--- AUDIO FLOWING" : " <--- SILENCE") << std::endl;
         }
     }).detach();
+    #endif
 }
 
 DeviceManager::~DeviceManager() { 
+    #if CM5_ENABLE_PROBES
     g_monitorRunning = false;
+    #endif
     stop_all();
     ma_context_uninit(&m_context);
 }

@@ -10,9 +10,15 @@
 #include <queue>
 #include <cstring>
 
+#define CM5_ENABLE_PROBES 0
+
+#if CM5_ENABLE_PROBES
 static std::atomic<uint32_t> g_processCount{0};
 #define SAMPLED_TRACE(msg, val) \
     if (++g_processCount % 100 == 0) { std::cout << "[TRACE] " << msg << " | Value: " << val << std::endl; }
+#else
+#define SAMPLED_TRACE(msg, val)
+#endif
 
 DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone) 
     : m_deviceManager(deviceManager), m_clientManager(clientManager), m_metrics(metrics), m_tone(tone) {
@@ -127,7 +133,6 @@ void DspEngine::rebuild_graph() {
                 std::string id = endpoint.substr(firstSlash, secondSlash - firstSlash);
                 bool isCapture = (endpoint.find("/capture") != std::string::npos);
                 for (auto& dev : activeDevices) {
-                    // FIXED: Ensure the device we pick matches the required direction (Capture/Playback)
                     if ((std::string(dev->get_info().id.alsa) == id || dev->get_original_id() == id) &&
                         (dev->get_info().is_capture == isCapture)) {
                         m_nodeHandlers[node] = {isCapture ? NodeHandler::Type::HARDWARE_CAPTURE : NodeHandler::Type::HARDWARE_PLAYBACK, dev.get(), dev->get_info().channels, endpoint, true};
