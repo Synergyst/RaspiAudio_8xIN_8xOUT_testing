@@ -217,7 +217,7 @@
             width: 100%;
             height: 100%;
             overflow: visible;
-            pointer-events: none;
+            pointer-events: auto;
             z-index: 1;
         }
         .cable {
@@ -977,7 +977,14 @@
                 const row = document.createElement('div');
                 row.className = 'channel-row';
                 row.id = `slot-${ep.id}-${i}`;
-                row.innerHTML = `<span class="ch-label">CH${i+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div>`;
+
+                // Sources (Outputs): [VU Meter] [CH Label] (label closest to right edge/cables)
+                // Destinations (Inputs): [CH Label] [VU Meter] (label closest to left edge/cables)
+                if (ep.direction === 'source') {
+                    row.innerHTML = `<div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div><span class="ch-label" style="text-align: right;">CH${i+1}</span>`;
+                } else {
+                    row.innerHTML = `<span class="ch-label">CH${i+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div>`;
+                }
 
                 row.onclick = () => handleSlotClick(ep, i);
 

@@ -20,6 +20,9 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <queue>
+#include <cstring>
 
 namespace {
 
@@ -385,7 +388,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
             m_known_client_names.clear();
             if (settings.contains("clients") && settings["clients"].is_object()) {
                 for (auto const& [key, name] : settings["clients"].items()) {
-                    if (name.is_string()) m_known_client_names[key] = name.get<std::string>();
+                    m_known_client_names[key] = name.get<std::string>();
                 }
             }
         }
@@ -460,7 +463,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             settings["routes"].push_back(rj);
         }
         settings["clients"] = nlohmann::json::object();
-        for (auto const& client : m_known_client_names) settings["clients"][client.first] = client.second;
+        for (auto const& [key, name] : m_known_client_names) settings["clients"][key] = name;
         for (auto const& session : m_sessions) {
             const std::string key = session->get_client_key();
             if (!key.empty()) settings["clients"][key] = session->get_client_name();
@@ -565,7 +568,8 @@ bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
 
 WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControls& tone,
                      ClientManager& clientMgr, DeviceManager& deviceMgr, DspEngine& dspEngine, int httpPort, int wsPort, bool plainText)
-    : m_metrics(metrics), m_controls(controls), m_tone(tone), m_clientMgr(clientMgr), m_deviceMgr(deviceMgr), m_dspEngine(dspEngine),
+    : m_metrics(metrics), m_controls(controls), m_tone(tone),
+      m_clientMgr(clientMgr), m_deviceMgr(deviceMgr), m_dspEngine(dspEngine),
       m_httpPort(httpPort), m_wsPort(wsPort), m_plainText(plainText) {}
 
 WebServer::~WebServer() { stop(); }
@@ -868,12 +872,13 @@ bool WebServer::start() {
 
         m_httpServer->Post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
             AudioRoute route;
-            std::string src_ep = request.has_param("source") ? request.get_param_value("source") : "";
-            std::string dst_ep = request.has_param("destination") ? request.get_param_value("destination") : "";
+            // FIXED: Updated parameter names to match the frontend dashboard
+            std::string src_ep = request.has_param("source_node") ? request.get_param_value("source_node") : "";
+            std::string dst_ep = request.has_param("destination_node") ? request.get_param_value("destination_node") : "";
             route.source_node = m_clientMgr.get_node_id(src_ep);
             route.destination_node = m_clientMgr.get_node_id(dst_ep);
-            route.source_channel = query_uint(request, "source_ch", 99);
-            route.destination_channel = query_uint(request, "destination_ch", 99);
+            route.source_channel = query_uint(request, "source_channel", 99);
+            route.destination_channel = query_uint(request, "destination_channel", 99);
             route.gain = query_float(request, "gain", 1.0f);
             route.enabled = query_bool(request, "enabled", true);
             uint32_t id = 0; std::string error;

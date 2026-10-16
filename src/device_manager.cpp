@@ -149,9 +149,20 @@ bool DeviceManager::activate_device(const std::string& id) {
             AudioDeviceInfo info = baseInfo;
 
             std::string alsaId = info.id.alsa;
-            if (!info.is_capture && (alsaId.find("hifiberry") != std::string::npos || info.name.find("HiFiBerry") != std::string::npos)) {
-                std::cout << "[DeviceManager] Routing HiFiBerry Playback through virtual device 'dac8x' (asound.conf)" << std::endl;
-                std::strncpy(info.id.alsa, "dac8x", sizeof(info.id.alsa) - 1);
+            if (!info.is_capture) {
+                // Special Case: HiFiBerry uses a specific virtual device defined in asound.conf
+                if (alsaId.find("hifiberry") != std::string::npos || info.name.find("HiFiBerry") != std::string::npos) {
+                    std::cout << "[DeviceManager] Routing HiFiBerry Playback through virtual device 'dac8x' (asound.conf)" << std::endl;
+                    std::strncpy(info.id.alsa, "dac8x", sizeof(info.id.alsa) - 1);
+                } else {
+                    // General Case: Use plughw to ensure the ALSA plugin layer handles 
+                    // Float32 -> S32_LE/S16_LE conversion for UAC/USB devices.
+                    if (std::string(info.id.alsa).find("hw:") == 0) {
+                        std::string plughw = "plughw" + std::string(info.id.alsa).substr(2);
+                        std::strncpy(info.id.alsa, plughw.c_str(), sizeof(info.id.alsa) - 1);
+                        std::cout << "[DeviceManager] Using plughw for playback: " << info.id.alsa << std::endl;
+                    }
+                }
             }
 
             auto dev = std::make_shared<HardwareDevice>(info, &m_context, id);
