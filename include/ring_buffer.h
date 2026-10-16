@@ -36,40 +36,33 @@ struct PcmRingBuffer {
 
     size_t write(const void* data, size_t bytes) {
         if (!initialized) return 0;
-        ma_uint32 framesToWrite = bytes / (sizeof(float) * channels);
+        ma_uint32 framesToWrite = bytes / ma_get_bytes_per_frame(format, channels);
         if (framesToWrite == 0) return 0;
-        
         void* pMappedBuffer;
         ma_uint32 actualFrames = framesToWrite;
         if (ma_pcm_rb_acquire_write(&rb, &actualFrames, &pMappedBuffer) != MA_SUCCESS) return 0;
         if (actualFrames == 0) return 0;
-        
-        std::memcpy(pMappedBuffer, data, actualFrames * sizeof(float) * channels);
+        std::memcpy(pMappedBuffer, data, actualFrames * ma_get_bytes_per_frame(format, channels));
         ma_pcm_rb_commit_write(&rb, actualFrames);
-        
         current_frames.fetch_add(actualFrames, std::memory_order_relaxed);
-        return actualFrames * sizeof(float) * channels;
+        return actualFrames * ma_get_bytes_per_frame(format, channels);
     }
 
     size_t read(void* data, size_t bytes) {
         if (!initialized) return 0;
-        ma_uint32 framesToRead = bytes / (sizeof(float) * channels);
+        ma_uint32 framesToRead = bytes / ma_get_bytes_per_frame(format, channels);
         if (framesToRead == 0) return 0;
-        
         void* pMappedBuffer;
         ma_uint32 actualFrames = framesToRead;
         if (ma_pcm_rb_acquire_read(&rb, &actualFrames, &pMappedBuffer) != MA_SUCCESS) return 0;
         if (actualFrames == 0) return 0;
-        
-        std::memcpy(data, pMappedBuffer, actualFrames * sizeof(float) * channels);
+        std::memcpy(data, pMappedBuffer, actualFrames * ma_get_bytes_per_frame(format, channels));
         ma_pcm_rb_commit_read(&rb, actualFrames);
-        
-        // Ensure we don't underflow the counter
+        size_t readBytes = actualFrames * ma_get_bytes_per_frame(format, channels);
         ma_uint32 current = current_frames.load(std::memory_order_relaxed);
         while (current >= actualFrames && 
                !current_frames.compare_exchange_weak(current, current - actualFrames, std::memory_order_relaxed));
-               
-        return actualFrames * sizeof(float) * channels;
+        return readBytes;
     }
 
     float get_fill_level() {
