@@ -4,15 +4,21 @@
 #include <algorithm>
 #include <cstring>
 #include <set>
+#include <atomic>
+#include <thread>
+#include <chrono>
+
+// Global debug monitor for the callbacks
+std::atomic<float> g_callbackPeak{0.0f};
+std::atomic<bool> g_monitorRunning{false};
 
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
     : m_info(info), m_context(context), m_originalId(originalId) {
-    ma_uint32 bufferFrames = m_info.sample_rate / 10; 
-    if (bufferFrames == 0) bufferFrames = 4800;
+    ma_uint32 bufferFrames = m_info.sample_rate / 5; 
+    if (bufferFrames == 0) bufferFrames = 9600;
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     
-    // Pre-allocate I/O buffer for zero-allocation routing
     io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
 }
 
@@ -25,46 +31,97 @@ void HardwareDevice::stop() {
 }
 
 bool HardwareDevice::init() {
-    ma_device_config config;
-    if (m_info.is_capture) {
-        config = ma_device_config_init(ma_device_type_capture);
-        config.capture.format = ma_format_f32;
-        config.capture.channels = m_info.channels;
-        config.capture.pDeviceID = &m_info.id;
+    auto attempt_init = [&](const ma_device_id* deviceId) -> bool {
+        ma_device_config config;
+        if (m_info.is_capture) {
+            config = ma_device_config_init(ma_device_type_capture);
+            config.capture.format = ma_format_f32;
+            config.capture.channels = m_info.channels;
+            config.capture.pDeviceID = deviceId;
+        } else {
+            config = ma_device_config_init(ma_device_type_playback);
+            config.playback.format = ma_format_f32;
+            config.playback.channels = m_info.channels;
+            config.playback.pDeviceID = deviceId;
+        }
+
+        config.sampleRate = 48000; 
+        config.dataCallback = HardwareDevice::data_callback;
+        config.pUserData = this;
+
+        if (m_context == nullptr) return false;
+
+        if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) {
+            return false;
+        }
+
+        if (ma_device_start(&m_device) != MA_SUCCESS) {
+            ma_device_uninit(&m_device);
+            return false;
+        }
+        return true;
+    };
+
+    std::cout << "[HardwareDevice] Attempting native init for " << m_originalId << "..." << std::endl;
+    if (attempt_init(&m_info.id)) {
+        std::cout << "[HardwareDevice] Native init successful for " << m_originalId << std::endl;
+        return true;
+    }
+
+    std::cout << "[HardwareDevice] Native init failed. Trying plughw fallback..." << std::endl;
+    std::string plughwStr = m_originalId;
+    if (plughwStr.find("hw:") == 0) {
+        plughwStr = "plughw" + plughwStr.substr(2);
+    } else if (!plughwStr.empty() && plughwStr[0] == ':') {
+        plughwStr = "plughw" + plughwStr;
     } else {
-        config = ma_device_config_init(ma_device_type_playback);
-        config.playback.format = ma_format_f32;
-        config.playback.channels = m_info.channels;
-        config.playback.pDeviceID = &m_info.id;
+        plughwStr = "plughw:" + plughwStr;
     }
 
-    config.sampleRate = 48000; 
-    config.dataCallback = HardwareDevice::data_callback;
-    config.pUserData = this;
+    ma_device_id fallbackId;
+    std::memset(&fallbackId, 0, sizeof(ma_device_id));
+    std::strncpy(fallbackId.alsa, plughwStr.c_str(), sizeof(fallbackId.alsa) - 1);
 
-    if (m_context == nullptr) return false;
-
-    if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) {
-        std::cerr << "[HardwareDevice] Init failed for " << m_info.name << " (" << m_info.channels << "ch)" << std::endl;
-        return false;
+    if (attempt_init(&fallbackId)) {
+        std::cout << "[HardwareDevice] plughw fallback successful for " << plughwStr << std::endl;
+        return true;
     }
 
-    if (ma_device_start(&m_device) != MA_SUCCESS) {
-        ma_device_uninit(&m_device);
-        return false;
-    }
-
-    return true;
+    std::cerr << "[HardwareDevice] All init attempts failed for " << m_originalId << std::endl;
+    return false;
 }
 
 void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     auto* device = static_cast<HardwareDevice*>(pDevice->pUserData);
+    
     if (device->m_info.is_capture && pInput) {
         device->m_input_rb.write(pInput, frameCount * device->m_info.channels * sizeof(float));
     } else if (!device->m_info.is_capture && pOutput) {
+        if (device->m_output_rb.get_fill_level() < 0.20f) {
+            std::memset(pOutput, 0, frameCount * device->m_info.channels * sizeof(float));
+            return;
+        }
+
         size_t bytesNeeded = frameCount * device->m_info.channels * sizeof(float);
         size_t got = device->m_output_rb.read(pOutput, bytesNeeded);
-        if (got < bytesNeeded) std::memset((uint8_t*)pOutput + got, 0, bytesNeeded - got);
+        
+        // DEBUG PROBE: Track peak value of data being sent to hardware
+        if (got > 0) {
+            float* samples = static_cast<float*>(pOutput);
+            size_t numSamples = got / sizeof(float);
+            float localPeak = 0.0f;
+            for (size_t i = 0; i < numSamples; ++i) {
+                float absS = std::abs(samples[i]);
+                if (absS > localPeak) localPeak = absS;
+            }
+            // Only update if this is higher than the current global peak (decayed)
+            float current = g_callbackPeak.load();
+            if (localPeak > current) g_callbackPeak.store(localPeak);
+        }
+
+        if (got < bytesNeeded) {
+            std::memset((uint8_t*)pOutput + got, 0, bytesNeeded - got);
+        }
     }
 }
 
@@ -72,9 +129,20 @@ DeviceManager::DeviceManager() {
     if (ma_context_init(NULL, 0, NULL, &m_context) != MA_SUCCESS) {
         std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
     }
+
+    // Start the hardware peak monitor thread
+    g_monitorRunning = true;
+    std::thread([]() {
+        while (g_monitorRunning) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            float peak = g_callbackPeak.exchange(0.0f); // Reset peak every second
+            std::cout << "[DEBUG] HW Callback Peak: " << peak << (peak > 0 ? " <--- AUDIO FLOWING" : " <--- SILENCE") << std::endl;
+        }
+    }).detach();
 }
 
 DeviceManager::~DeviceManager() { 
+    g_monitorRunning = false;
     stop_all();
     ma_context_uninit(&m_context);
 }
@@ -146,26 +214,7 @@ bool DeviceManager::activate_device(const std::string& id) {
             std::string uniqueKey = id + (baseInfo.is_capture ? "_capture" : "_playback");
             if (m_active_devices.count(uniqueKey)) continue;
             
-            AudioDeviceInfo info = baseInfo;
-
-            std::string alsaId = info.id.alsa;
-            if (!info.is_capture) {
-                // Special Case: HiFiBerry uses a specific virtual device defined in asound.conf
-                if (alsaId.find("hifiberry") != std::string::npos || info.name.find("HiFiBerry") != std::string::npos) {
-                    std::cout << "[DeviceManager] Routing HiFiBerry Playback through virtual device 'dac8x' (asound.conf)" << std::endl;
-                    std::strncpy(info.id.alsa, "dac8x", sizeof(info.id.alsa) - 1);
-                } else {
-                    // General Case: Use plughw to ensure the ALSA plugin layer handles 
-                    // Float32 -> S32_LE/S16_LE conversion for UAC/USB devices.
-                    if (std::string(info.id.alsa).find("hw:") == 0) {
-                        std::string plughw = "plughw" + std::string(info.id.alsa).substr(2);
-                        std::strncpy(info.id.alsa, plughw.c_str(), sizeof(info.id.alsa) - 1);
-                        std::cout << "[DeviceManager] Using plughw for playback: " << info.id.alsa << std::endl;
-                    }
-                }
-            }
-
-            auto dev = std::make_shared<HardwareDevice>(info, &m_context, id);
+            auto dev = std::make_shared<HardwareDevice>(baseInfo, &m_context, id);
             if (dev->init()) {
                 m_active_devices[uniqueKey] = dev;
                 anyActivated = true;

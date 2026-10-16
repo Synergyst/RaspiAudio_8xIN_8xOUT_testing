@@ -16,7 +16,8 @@ DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager,
     m_nodeBufferPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
     m_feedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
     m_nextFeedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
-    m_routeScratchBuffer.resize(CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
+    
+    m_routeScratchBuffer.resize(CM5_BUFFER_FRAMES, 0.0f);
     
     m_gainProc = std::make_unique<GainProcessor>(1.0f);
     m_compProc = std::make_unique<CompressorProcessor>(0.7f, 4.0f);
@@ -53,18 +54,15 @@ void DspEngine::update_route_chain(uint32_t routeId, std::vector<std::unique_ptr
     RouteDsp& rdsp = m_routeDsp[routeId];
     int write_idx = 1 - rdsp.current_idx.load(std::memory_order_relaxed);
     
-    // Clear the write buffer
     for (unsigned i = 0; i < CM5_MAX_PROCESSORS_PER_ROUTE; ++i) {
         rdsp.chain[write_idx][i] = nullptr;
     }
 
-    // Populate new chain
     int len = std::min((int)newChain.size(), (int)CM5_MAX_PROCESSORS_PER_ROUTE);
     for (int i = 0; i < len; ++i) {
         rdsp.chain[write_idx][i] = std::move(newChain[i]);
     }
 
-    // Commit changes atomically
     rdsp.length.store(len, std::memory_order_release);
     rdsp.current_idx.store(write_idx, std::memory_order_release);
 }
@@ -184,7 +182,6 @@ void DspEngine::rebuild_graph() {
             }
         }
         
-        // FINAL STEP: Any node in the DAG not mapped to a physical source is a Virtual Node
         if (!m_nodeHandlers[node].active) {
             m_nodeHandlers[node] = {NodeHandler::Type::VIRTUAL, nullptr, CM5_INTERNAL_WIDTH, "virtual/" + std::to_string(node), true};
         }
@@ -231,14 +228,13 @@ void DspEngine::process_audio() {
         if (node < 0 || node >= (int)MAX_NODES || !m_nodeHandlers[node].active) continue;
         const NodeHandler& handler = m_nodeHandlers[node];
 
-        // Node Source Phase: Only Physical/Tone nodes generate audio. Virtual nodes are purely summative.
         if (handler.type == NodeHandler::Type::TONE) {
             if (m_tone.enabled) {
                 float freq = m_tone.frequency_hz;
                 float amp = m_tone.amplitude;
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
                     float sample = std::sin(m_tonePhase * 2.0 * M_PI) * amp;
-                    buf[f * CM5_INTERNAL_WIDTH + 0] = sample;
+                    buf[f * CM5_INTERNAL_WIDTH + 0] += sample;
                     m_tonePhase += freq / m_engineSampleRate;
                     if (m_tonePhase > 1.0) m_tonePhase -= 1.0;
                 }
@@ -249,7 +245,7 @@ void DspEngine::process_audio() {
             if (read > 0) {
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
                     for (unsigned ch = 0; ch < dev->get_info().channels && ch < CM5_INTERNAL_WIDTH; ++ch) {
-                        buf[f * CM5_INTERNAL_WIDTH + ch] = dev->io_buffer[f * dev->get_info().channels + ch];
+                        buf[f * CM5_INTERNAL_WIDTH + ch] += dev->io_buffer[f * dev->get_info().channels + ch];
                     }
                 }
                 update_meters(buf, dev->get_info().channels, handler.endpointId, true);
@@ -261,14 +257,13 @@ void DspEngine::process_audio() {
                 unsigned chs = s->input_channels.load();
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
                     for (unsigned ch = 0; ch < chs && ch < CM5_INTERNAL_WIDTH; ++ch) {
-                        buf[f * CM5_INTERNAL_WIDTH + ch] = s->io_buffer[f * chs + ch];
+                        buf[f * CM5_INTERNAL_WIDTH + ch] += s->io_buffer[f * chs + ch];
                     }
                 }
                 update_meters(buf, chs, handler.endpointId, true);
             }
         }
 
-        // Routing Phase
         if (node >= 0 && node < (int)MAX_NODES) {
             for (const auto* route : m_adjList[node]) {
                 float* dstBuf = get_buffer(route->destination_node);
@@ -288,12 +283,10 @@ void DspEngine::process_audio() {
                         srcData = get_feedback_buffer(node);
                     }
 
-                    std::fill(m_routeScratchBuffer.begin(), m_routeScratchBuffer.end(), 0.0f);
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-                        m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
+                        m_routeScratchBuffer[f] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
                     }
 
-                    // HARDENED ROUTE DSP LOOKUP
                     float currentGain = route->gain;
                     if (route->id >= 0 && (size_t)route->id < MAX_ROUTES) {
                         RouteDsp& rdsp = m_routeDsp[route->id];
@@ -310,13 +303,12 @@ void DspEngine::process_audio() {
                     }
 
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-                        dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += m_routeScratchBuffer[f * CM5_INTERNAL_WIDTH + 0] * currentGain;
+                        dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += m_routeScratchBuffer[f] * currentGain;
                     }
                 }
             }
         }
 
-        // Playback Phase
         if (handler.type == NodeHandler::Type::HARDWARE_PLAYBACK) {
             auto* dev = static_cast<HardwareDevice*>(handler.ptr);
             m_gainProc->process(buf, CM5_BUFFER_FRAMES, CM5_INTERNAL_WIDTH);
