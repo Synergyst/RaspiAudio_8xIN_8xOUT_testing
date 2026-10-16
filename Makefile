@@ -7,25 +7,36 @@ SRCS = src/main.cpp src/miniaudio_impl.cpp src/web_server.cpp src/device_manager
 OBJS = $(SRCS:src/%.cpp=build/%.o)
 TARGET = cm5audio
 
-CAPS_SRCS = src/alsa_caps.cpp
 CAPS_OBJ = build/alsa_caps.o
 CAPS_TARGET = alsa_caps
 
-all: build $(TARGET) $(CAPS_TARGET)
+TEST_OBJ = build/alsa_bridge_test.o
+TEST_TARGET = alsa_bridge_test
+
+all: build $(TARGET)
 
 build:
-	mkdir -p build
+		mkdir -p build
 
 build/%.o: src/%.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+		$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(TARGET): $(OBJS)
-	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+		$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+
+# Optional tool targets (only built when explicitly invoked)
+alsatools: $(CAPS_TARGET) $(TEST_TARGET)
 
 $(CAPS_TARGET): $(CAPS_OBJ)
-	$(CXX) $(CAPS_OBJ) -o $@ $(LDFLAGS)
+		$(CXX) $(CAPS_OBJ) -o $@ $(LDFLAGS)
+
+$(TEST_TARGET): $(TEST_OBJ)
+		$(CXX) $(TEST_OBJ) -o $@ $(LDFLAGS)
 
 clean:
-	rm -rf build $(TARGET) $(CAPS_TARGET)
+		rm -rf $(OBJS) $(TARGET)
 
-.PHONY: all clean
+clean-alsatools:
+		rm -rf $(CAPS_OBJ) $(TEST_OBJ) $(CAPS_TARGET) $(TEST_TARGET)
+
+.PHONY: all clean clean-alsatools alsatools
