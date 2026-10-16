@@ -137,13 +137,15 @@
         }
 
         .column {
-            display: flex;
-            flex-direction: column;
-            gap: 25px;
-            z-index: 5;
+            position: relative;
             width: 260px;
+            min-height: 2000px;
+            z-index: 5;
         }
         .endpoint-block {
+            position: absolute;
+            top: 0;
+            left: 0;
             background: var(--panel-bg);
             border: 2px solid var(--border-color);
             border-radius: 8px;
@@ -151,7 +153,6 @@
             width: 100%;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
             cursor: default;
-            position: relative;
             user-select: none;
             transition: border-color 0.2s;
         }
@@ -491,7 +492,7 @@
     <div id="route-modal">
         <h2 style="margin-top:0; font-size: 15px; color: var(--accent-blue)">Route Inspector & DSP Chain</h2>
         <div id="route-info" style="margin-bottom: 12px; font-family: monospace; font-size: 11px; word-break: break-all;"></div>
-        
+
         <div class="control-group">
             <div class="control-row">
                 <label>Route Gain</label>
@@ -515,7 +516,7 @@
                 <label>DSP Master Gain</label>
                 <input type="number" id="modal-dsp-gain" step="0.01" onchange="onDspGainChange()">
             </div>
-            
+
             <label style="font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px;">Processor Chain</label>
             <div id="dsp-chain-list" class="dsp-chain-container"></div>
 
@@ -635,8 +636,14 @@
             localStorage.removeItem('cm5_node_positions');
             nodePositions = {};
             endpointBlocks.forEach(b => {
-                b.style.transform = '';
+                const epId = b.dataset.epId;
+                const parent = b.parentElement;
+                const idx = Array.from(parent.children).indexOf(b);
+                const defY = idx * 160;
+                nodePositions[epId] = { x: 0, y: defY };
+                b.style.transform = `translate(0px, ${defY}px)`;
             });
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
             isInitialFitDone = false;
             autoFitViewport();
             drawCables();
@@ -902,17 +909,30 @@
                 });
             });
 
+            let srcIndex = 0;
+            let destIndex = 0;
+
             graph.endpoints.forEach(ep => {
+                const isSource = ep.direction === 'source';
+                const idx = isSource ? srcIndex++ : destIndex++;
+
+                if (!nodePositions[ep.id]) {
+                    nodePositions[ep.id] = { x: 0, y: idx * 160 };
+                }
+
                 let block = endpointBlocks.get(ep.id);
                 if (!block) {
                     block = createEndpointBlock(ep);
-                    if (ep.direction === 'source') srcCont.appendChild(block);
+                    if (isSource) srcCont.appendChild(block);
                     else destCont.appendChild(block);
                 } else {
                     block.querySelector('.endpoint-header').textContent = ep.name || ep.id;
+                    const pos = nodePositions[ep.id];
+                    block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
                 }
             });
 
+            localStorage.setItem('cm5_node_positions', JSON.stringify(nodePositions));
             rebuildMeterCache();
 
             if (activeTabName === 'patchbay') {
@@ -926,9 +946,8 @@
             block.id = `block-${ep.id}`;
             block.dataset.epId = ep.id;
 
-            if (nodePositions[ep.id]) {
-                block.style.transform = `translate(${nodePositions[ep.id].x}px, ${nodePositions[ep.id].y}px)`;
-            }
+            const pos = nodePositions[ep.id] || { x: 0, y: 0 };
+            block.style.transform = `translate(${pos.x}px, ${pos.y}px)`;
 
             const header = document.createElement('div');
             header.className = 'endpoint-header';
@@ -959,7 +978,7 @@
                 row.className = 'channel-row';
                 row.id = `slot-${ep.id}-${i}`;
                 row.innerHTML = `<span class="ch-label">CH${i+1}</span><div class="vu-container"><div class="vu-fill" id="vu-${ep.id}-${i}"></div><div class="vu-peak" id="peak-${ep.id}-${i}"></div></div>`;
-                
+
                 row.onclick = () => handleSlotClick(ep, i);
 
                 if (ep.direction === 'source') {
@@ -967,11 +986,11 @@
                         if (e.button !== 0) return;
                         isWiringDrag = true;
                         wiringSource = { endpointId: ep.id, channel: i };
-                        
+
                         document.querySelectorAll('.channel-row.selected').forEach(el => el.classList.remove('selected'));
                         row.classList.add('selected');
                         activeSource = { endpointId: ep.id, channel: i };
-                        
+
                         patchbay.setPointerCapture(e.pointerId);
                         e.stopPropagation();
                     });
@@ -999,36 +1018,55 @@
 
         async function createRoute(srcId, srcCh, destId, destCh) {
             try {
-                await fetchAPI('/api/routes', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        source_node: srcId,
-                        source_channel: srcCh,
-                        destination_node: destId,
-                        destination_channel: destCh,
-                        gain: 1.0,
-                        enabled: true
-                    })
+                const params = new URLSearchParams({
+                    source_node: srcId,
+                    source_channel: srcCh,
+                    destination_node: destId,
+                    destination_channel: destCh,
+                    gain: 1.0,
+                    enabled: '1'
                 });
+                await fetchAPI(`/api/routes?${params.toString()}`, { method: 'POST' });
                 await loadGraph();
             } catch (e) {
                 alert('Routing failed: ' + e.message);
             }
         }
 
+        function getEndpointId(nodeRef) {
+            if (!graph.endpoints) return nodeRef;
+            const direct = graph.endpoints.find(e => e.id == nodeRef);
+            if (direct) return direct.id;
+            const idx = Number(nodeRef);
+            if (!isNaN(idx) && graph.endpoints[idx]) {
+                return graph.endpoints[idx].id;
+            }
+            return nodeRef;
+        }
+
         function drawCables() {
             if (activeTabName !== 'patchbay') return;
             const svg = $('cable-svg');
-            
+
             const cables = svg.querySelectorAll('.cable');
             cables.forEach(c => c.remove());
 
             const viewportRect = $('patchbay-viewport').getBoundingClientRect();
 
-            graph.routes.forEach(route => {
-                const srcEl = $(`slot-${route.source}-${route.source_channel}`);
-                const destEl = $(`slot-${route.destination}-${route.destination_channel}`);
+            if (!graph.routes || graph.routes.length === 0) return;
+
+            graph.routes.forEach((route, idx) => {
+                const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+                const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+
+                const srcEpId = getEndpointId(srcRef);
+                const destEpId = getEndpointId(destRef);
+
+                const srcSlotId = `slot-${srcEpId}-${route.source_channel}`;
+                const destSlotId = `slot-${destEpId}-${route.destination_channel}`;
+
+                const srcEl = $(srcSlotId);
+                const destEl = $(destSlotId);
                 if (!srcEl || !destEl) return;
 
                 const srcRect = srcEl.getBoundingClientRect();
@@ -1044,11 +1082,12 @@
                 const cp2x = x1 + (x2 - x1) * 0.5;
                 path.setAttribute('d', `M ${x1} ${y1} C ${cp1x} ${y1}, ${cp2x} ${y2}, ${x2} ${y2}`);
                 path.setAttribute('class', 'cable');
-                
-                let strokeColor = route.enabled ? 'var(--accent-blue)' : 'var(--accent-red)';
+
+                const strokeColor = route.enabled ? '#88c0d0' : '#bf616a';
                 path.setAttribute('stroke', strokeColor);
-                
-                if (route.dsp_active) {
+
+                const isDspActive = route.dsp_active ?? route.dsp?.active ?? false;
+                if (isDspActive) {
                     path.classList.add('cable-fx');
                 }
 
@@ -1059,7 +1098,12 @@
 
         async function openRouteModal(route) {
             editingRouteId = route.id;
-            $('route-info').textContent = `${route.source} (CH${route.source_channel + 1}) \u2192 ${route.destination} (CH${route.destination_channel + 1})`;
+            const srcRef = route.source_node !== undefined ? route.source_node : route.source;
+            const destRef = route.destination_node !== undefined ? route.destination_node : route.destination;
+            const srcEpId = getEndpointId(srcRef);
+            const destEpId = getEndpointId(destRef);
+
+            $('route-info').textContent = `${srcEpId} (CH${route.source_channel + 1}) \u2192 ${destEpId} (CH${route.destination_channel + 1})`;
             $('modal-gain').value = route.gain;
             $('modal-enabled').value = route.enabled ? '1' : '0';
 
