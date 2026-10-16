@@ -9,23 +9,14 @@
 #include <chrono>
 
 // CONFIGURATION
-#define CM5_RB_SIZE_MS 120           // Total ring buffer size in milliseconds
-#define CM5_ENABLE_PROBES 0         // Set to 1 to enable console signal tracing
-
-#if CM5_ENABLE_PROBES
-std::atomic<float> g_callbackPeak{0.0f};
-std::atomic<bool> g_monitorRunning{false};
-std::atomic<uint32_t> g_callbackCount{0};
-#endif
+#define CM5_RB_SIZE_MS 40           
+#define CM5_ENABLE_PROBES 0         
 
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
     : m_info(info), m_context(context), m_originalId(originalId) {
-    
     ma_uint32 bufferFrames = (m_info.sample_rate * CM5_RB_SIZE_MS) / 1000;
-    
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
-    
     io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
 }
 
@@ -72,56 +63,31 @@ bool HardwareDevice::init() {
 void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     auto* device = static_cast<HardwareDevice*>(pDevice->pUserData);
     if (device->m_info.is_capture && pInput) {
-        size_t written = device->m_input_rb.write(pInput, frameCount * device->m_info.channels * sizeof(float));
-        #if CM5_ENABLE_PROBES
-        if (g_callbackCount.fetch_add(1) % 100 == 0) {
-            std::cout << "[PROBE A] Capture Callback " << device->m_originalId << " wrote " << written << " bytes" << std::endl;
-        }
-        #endif
+        device->m_input_rb.write(pInput, frameCount * device->m_info.channels * sizeof(float));
     } else if (!device->m_info.is_capture && pOutput) {
         size_t bytesNeeded = frameCount * device->m_info.channels * sizeof(float);
         size_t got = device->m_output_rb.read(pOutput, bytesNeeded);
-        
-        #if CM5_ENABLE_PROBES
-        if (got > 0) {
-            float* samples = static_cast<float*>(pOutput);
-            size_t numSamples = got / sizeof(float);
-            float localPeak = 0.0f;
-            for (size_t i = 0; i < numSamples; ++i) {
-                float absS = std::abs(samples[i]);
-                if (absS > localPeak) localPeak = absS;
-            }
-            float current = g_callbackPeak.load();
-            if (localPeak > current) g_callbackPeak.store(localPeak);
-        }
-        if (g_callbackCount.fetch_add(1) % 100 == 0) {
-            std::cout << "[PROBE D] Playback Callback " << device->m_originalId << " read " << got << "/" << bytesNeeded << " bytes" << std::endl;
-        }
-        #endif
         if (got < bytesNeeded) std::memset((uint8_t*)pOutput + got, 0, bytesNeeded - got);
     }
 }
 
 DeviceManager::DeviceManager() {
     if (ma_context_init(NULL, 0, NULL, &m_context) != MA_SUCCESS) std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
-    #if CM5_ENABLE_PROBES
-    g_monitorRunning = true;
-    std::thread([]() {
-        while (g_monitorRunning) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            float peak = g_callbackPeak.exchange(0.0f);
-            std::cout << "[DEBUG] HW Callback Peak: " << peak << (peak > 0 ? " <--- AUDIO FLOWING" : " <--- SILENCE") << std::endl;
-        }
-    }).detach();
-    #endif
 }
 
 DeviceManager::~DeviceManager() { 
-    #if CM5_ENABLE_PROBES
-    g_monitorRunning = false;
-    #endif
     stop_all();
     ma_context_uninit(&m_context);
+}
+
+// Helper for case-insensitive string searching
+bool contains_ignore_case(const std::string& haystack, const std::string& needle) {
+    auto it = std::search(
+        haystack.begin(), haystack.end(),
+        needle.begin(), needle.end(),
+        [](char ch1, char ch2) { return std::tolower(ch1) == std::tolower(ch2); }
+    );
+    return it != haystack.end();
 }
 
 void DeviceManager::enumerate_devices() {
@@ -145,7 +111,15 @@ void DeviceManager::enumerate_devices() {
         }
         info.channels = (maxChannels > 0) ? maxChannels : 2;
         info.sample_rate = bestSampleRate;
-        if (info.channels < 8 && (info.name.find("8x") != std::string::npos || info.name.find("DAC8") != std::string::npos)) info.channels = 8;
+
+        // FIXED: Case-insensitive sensing for 8-channel devices
+        if (info.channels < 8) {
+            if (contains_ignore_case(info.name, "8x") || 
+                contains_ignore_case(info.name, "dac8") || 
+                contains_ignore_case(info.name, "hifiberry")) {
+                info.channels = 8;
+            }
+        }
         manager->m_available_devices.push_back(info);
         return 1; 
     }, this);
