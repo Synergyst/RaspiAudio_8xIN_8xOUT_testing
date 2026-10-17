@@ -91,13 +91,28 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
     }
 }
 
-ma_backend backends[] = {
-    ma_backend_pulseaudio,
-    ma_backend_alsa,
-};
-
 DeviceManager::DeviceManager() {
-    if (ma_context_init(backends, std::size(backends), NULL, &m_context) != MA_SUCCESS) std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
+    // Priority order: JACK (Pro) -> PulseAudio (Desktop) -> ALSA (Hardware Native)
+    ma_backend backends[] = {
+        ma_backend_jack,
+        ma_backend_pulseaudio,
+        ma_backend_alsa,
+    };
+
+    std::cout << "[DeviceManager] Initializing backend search..." << std::endl;
+    std::cout << "[DeviceManager] Enabled backends (priority order):" << std::endl;
+    for (size_t i = 0; i < std::size(backends); ++i) {
+        std::cout << "  " << i + 1 << ". " << ma_get_backend_name(backends[i]) << std::endl;
+    }
+
+    ma_context_config config = ma_context_config_init();
+
+    if (ma_context_init(backends, std::size(backends), &config, &m_context) != MA_SUCCESS) {
+        std::cerr << "[DeviceManager] CRITICAL ERROR: Failed to initialize any available audio backend!" << std::endl;
+    } else {
+        std::cout << "[DeviceManager] SUCCESS: Context initialized." << std::endl;
+        std::cout << "[DeviceManager] Active Backend: " << ma_get_backend_name(m_context.backend) << std::endl;
+    }
 }
 
 DeviceManager::~DeviceManager() {
