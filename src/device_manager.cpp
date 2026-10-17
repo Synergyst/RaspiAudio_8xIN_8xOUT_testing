@@ -9,12 +9,22 @@
 #include <chrono>
 
 // CONFIGURATION
-#define CM5_RB_SIZE_MS 40           
-#define CM5_ENABLE_PROBES 0         
+//#define CM5_RB_SIZE_MS 20
+#define CM5_ENABLE_PROBES 0
 
-HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
+/*HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
     : m_info(info), m_context(context), m_originalId(originalId) {
     ma_uint32 bufferFrames = (m_info.sample_rate * CM5_RB_SIZE_MS) / 1000;
+    m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
+    m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
+    io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
+}*/
+HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId)
+    : m_info(info), m_context(context), m_originalId(originalId) {
+
+    // MATHEMATICAL FIX: Ring buffer is always 3x the processing block size (safe headroom)
+    ma_uint32 bufferFrames = CM5_BUFFER_FRAMES * 3;
+
     m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
     io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
@@ -34,13 +44,15 @@ bool HardwareDevice::init() {
             config.capture.format = ma_format_f32;
             config.capture.channels = m_info.channels;
             config.capture.pDeviceID = deviceId;
+            config.periodSizeInFrames = CM5_BUFFER_FRAMES;
         } else {
             config = ma_device_config_init(ma_device_type_playback);
             config.playback.format = ma_format_f32;
             config.playback.channels = m_info.channels;
             config.playback.pDeviceID = deviceId;
+            config.periodSizeInFrames = CM5_BUFFER_FRAMES;
         }
-        config.sampleRate = 48000; 
+        config.sampleRate = 48000;
         config.dataCallback = HardwareDevice::data_callback;
         config.pUserData = this;
         if (m_context == nullptr) return false;

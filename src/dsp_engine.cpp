@@ -162,7 +162,7 @@ void DspEngine::rebuild_graph() {
     m_graphDirty.store(false, std::memory_order_release);
 }
 
-void DspEngine::processing_loop() {
+/*void DspEngine::processing_loop() {
     std::cout << "[DspEngine] Processing loop started (True Zero-Allocation)." << std::endl;
     while (m_running) {
         auto start_time = std::chrono::steady_clock::now();
@@ -171,6 +171,73 @@ void DspEngine::processing_loop() {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
         auto sleep_time = std::chrono::milliseconds(10) - elapsed;
         if (sleep_time > std::chrono::milliseconds(0)) std::this_thread::sleep_for(sleep_time);
+    }
+}*/
+/*void DspEngine::processing_loop() {
+    std::cout << "[DspEngine] Processing loop started (True Zero-Allocation)." << std::endl;
+
+    auto next_wakeup = std::chrono::steady_clock::now();
+    const auto interval = std::chrono::microseconds(20000); // 20 ms (matches periodSizeInFrames = 960)
+
+    while (m_running) {
+        next_wakeup += interval;
+
+        process_audio();
+
+        auto now = std::chrono::steady_clock::now();
+        if (next_wakeup > now) {
+            std::this_thread::sleep_until(next_wakeup);
+        } else {
+            // If processing took longer than 20 ms, reset baseline to prevent CPU spin locking
+            next_wakeup = now;
+        }
+    }
+}*/
+/*void DspEngine::processing_loop() {
+    std::cout << "[DspEngine] Processing loop started (Dynamic Timing)." << std::endl;
+
+    // Dynamically calculate exact microsecond interval from constants & sample rate
+    // e.g., (960 frames / 48000 Hz) * 1,000,000 = 20,000 microseconds (20ms)
+    auto interval = std::chrono::microseconds(
+        (static_cast<long long>(CM5_BUFFER_FRAMES) * 1000000LL) / m_engineSampleRate
+    );
+
+    auto next_wakeup = std::chrono::steady_clock::now();
+
+    while (m_running) {
+        next_wakeup += interval;
+
+        process_audio();
+
+        auto now = std::chrono::steady_clock::now();
+        if (next_wakeup > now) {
+            std::this_thread::sleep_until(next_wakeup);
+        } else {
+            next_wakeup = now; // Prevent CPU spinlock if a cycle runs long
+        }
+    }
+}*/
+void DspEngine::processing_loop() {
+    std::cout << "[DspEngine] Processing loop started (Dynamic Unified Timing)." << std::endl;
+
+    // Mathematical interval: (Frames / SampleRate) * 1,000,000 microseconds
+    auto interval = std::chrono::microseconds(
+        (static_cast<long long>(CM5_BUFFER_FRAMES) * 1000000LL) / m_engineSampleRate
+    );
+
+    auto next_wakeup = std::chrono::steady_clock::now();
+
+    while (m_running) {
+        next_wakeup += interval;
+
+        process_audio();
+
+        auto now = std::chrono::steady_clock::now();
+        if (next_wakeup > now) {
+            std::this_thread::sleep_until(next_wakeup);
+        } else {
+            next_wakeup = now; // Prevent spinlock if an iteration runs long
+        }
     }
 }
 
