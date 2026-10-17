@@ -83,11 +83,16 @@ void HardwareDevice::data_callback(ma_device* pDevice, void* pOutput, const void
     }
 }
 
+ma_backend backends[] = {
+    ma_backend_pulseaudio,
+    ma_backend_alsa,
+};
+
 DeviceManager::DeviceManager() {
-    if (ma_context_init(NULL, 0, NULL, &m_context) != MA_SUCCESS) std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
+    if (ma_context_init(backends, std::size(backends), NULL, &m_context) != MA_SUCCESS) std::cerr << "[DeviceManager] Critical: Failed to init global context" << std::endl;
 }
 
-DeviceManager::~DeviceManager() { 
+DeviceManager::~DeviceManager() {
     stop_all();
     ma_context_uninit(&m_context);
 }
@@ -126,14 +131,12 @@ void DeviceManager::enumerate_devices() {
 
         // FIXED: Case-insensitive sensing for 8-channel devices
         if (info.channels < 8) {
-            if (contains_ignore_case(info.name, "8x") || 
-                contains_ignore_case(info.name, "dac8") || 
-                contains_ignore_case(info.name, "hifiberry")) {
+            if (contains_ignore_case(info.name, "8x") || contains_ignore_case(info.name, "dac8") || contains_ignore_case(info.name, "hifiberry")) {
                 info.channels = 8;
             }
         }
         manager->m_available_devices.push_back(info);
-        return 1; 
+        return 1;
     }, this);
 }
 

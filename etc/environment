@@ -1,0 +1,2 @@
+XDG_RUNTIME_DIR="/run/pipewire"
+PIPEWIRE_LATENCY="64/48000"
