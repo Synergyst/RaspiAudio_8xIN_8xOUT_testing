@@ -7,27 +7,23 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 // CONFIGURATION
-//#define CM5_RB_SIZE_MS 20
 #define CM5_ENABLE_PROBES 0
+#define CM5_ENABLE_HW_INFO_DUMP 1
 
-/*HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId) 
-    : m_info(info), m_context(context), m_originalId(originalId) {
-    ma_uint32 bufferFrames = (m_info.sample_rate * CM5_RB_SIZE_MS) / 1000;
-    m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
-    m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
-    io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
-}*/
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId)
     : m_info(info), m_context(context), m_originalId(originalId) {
 
     // MATHEMATICAL FIX: Ring buffer is always 3x the processing block size (safe headroom)
     ma_uint32 bufferFrames = CM5_BUFFER_FRAMES * 3;
 
-    m_input_rb.init(ma_format_f32, m_info.channels, bufferFrames);
-    m_output_rb.init(ma_format_f32, m_info.channels, bufferFrames);
-    io_buffer.resize(CM5_BUFFER_FRAMES * m_info.channels);
+    // If channels is 0, we use a safe default for the buffers until init() corrects it
+    unsigned channels = (m_info.channels > 0) ? m_info.channels : 2;
+    m_input_rb.init(ma_format_f32, channels, bufferFrames);
+    m_output_rb.init(ma_format_f32, channels, bufferFrames);
+    io_buffer.resize(CM5_BUFFER_FRAMES * channels);
 }
 
 HardwareDevice::~HardwareDevice() { stop(); }
@@ -42,13 +38,15 @@ bool HardwareDevice::init() {
         if (m_info.is_capture) {
             config = ma_device_config_init(ma_device_type_capture);
             config.capture.format = ma_format_f32;
-            config.capture.channels = m_info.channels;
+            // FIX: If channels is 0, let miniaudio use native hardware count
+            config.capture.channels = (m_info.channels > 0) ? m_info.channels : 0;
             config.capture.pDeviceID = deviceId;
             config.periodSizeInFrames = CM5_BUFFER_FRAMES;
         } else {
             config = ma_device_config_init(ma_device_type_playback);
             config.playback.format = ma_format_f32;
-            config.playback.channels = m_info.channels;
+            // FIX: If channels is 0, let miniaudio use native hardware count
+            config.playback.channels = (m_info.channels > 0) ? m_info.channels : 0;
             config.playback.pDeviceID = deviceId;
             config.periodSizeInFrames = CM5_BUFFER_FRAMES;
         }
@@ -58,6 +56,16 @@ bool HardwareDevice::init() {
         if (m_context == nullptr) return false;
         if (ma_device_init(m_context, &config, &m_device) != MA_SUCCESS) return false;
         if (ma_device_start(&m_device) != MA_SUCCESS) { ma_device_uninit(&m_device); return false; }
+
+        // UPDATE: Now that the device is started, we know the ACTUAL channel count
+        m_info.channels = m_info.is_capture ? m_device.capture.channels : m_device.playback.channels;
+
+        // Re-size buffers if the native count differs from our initial guess
+        unsigned actual = m_info.channels;
+        m_input_rb.init(ma_format_f32, actual, (CM5_BUFFER_FRAMES * 3));
+        m_output_rb.init(ma_format_f32, actual, (CM5_BUFFER_FRAMES * 3));
+        io_buffer.resize(CM5_BUFFER_FRAMES * actual);
+
         return true;
     };
     if (attempt_init(&m_info.id)) return true;
@@ -97,7 +105,6 @@ DeviceManager::~DeviceManager() {
     ma_context_uninit(&m_context);
 }
 
-// Helper for case-insensitive string searching
 bool contains_ignore_case(const std::string& haystack, const std::string& needle) {
     auto it = std::search(
         haystack.begin(), haystack.end(),
@@ -126,15 +133,27 @@ void DeviceManager::enumerate_devices() {
                 bestSampleRate = pDeviceInfo->nativeDataFormats[i].sampleRate;
             }
         }
-        info.channels = (maxChannels > 0) ? maxChannels : 2;
+
+        // FIX: Remove fallback to 2. Use 0 to indicate "Native" if unknown.
+        info.channels = maxChannels;
         info.sample_rate = bestSampleRate;
 
-        // FIXED: Case-insensitive sensing for 8-channel devices
+        // Keep the specific overrides for known multi-channel hardware
         if (info.channels < 8) {
             if (contains_ignore_case(info.name, "8x") || contains_ignore_case(info.name, "dac8") || contains_ignore_case(info.name, "hifiberry")) {
                 info.channels = 8;
             }
         }
+
+        #if CM5_ENABLE_HW_INFO_DUMP
+        std::cout << "[HW PROBE] Name: " << info.name
+                  << " | ID: " << pDeviceInfo->id.alsa
+                  << " | Type: " << (info.is_capture ? "Capture" : "Playback")
+                  << " | NativeFormats: " << pDeviceInfo->nativeDataFormatCount
+                  << " | MaxChannels: " << maxChannels
+                  << " | FinalChannels: " << info.channels << (info.channels == 0 ? " (Native)" : "") << std::endl;
+        #endif
+
         manager->m_available_devices.push_back(info);
         return 1;
     }, this);
