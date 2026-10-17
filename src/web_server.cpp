@@ -234,8 +234,6 @@ std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, con
     session->id = id;
     session->remote_ip = remoteIp;
     session->set_identity("connection-" + std::to_string(id), "Client " + std::to_string(id));
-    session->incoming_rb.init(ma_format_f32, 1, 48000);
-    session->outgoing_rb.init(ma_format_f32, 2, 48000);
     session->io_buffer.resize(CM5_BUFFER_FRAMES * CM5_MAX_CHANNELS);
     session->input_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
     session->output_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
@@ -887,7 +885,7 @@ bool WebServer::start() {
                 response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error) + "\"}", "application/json");
                 return;
             }
-            response.set_content("{\"status\":\"ok\",\"id\":" + std::to_string(id) + "}", "application/json");
+            response.set_content("{\"status\":\"ok\",\"id\":\"" + std::to_string(id) + "\"}", "application/json");
         });
 
         m_httpServer->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
@@ -1061,8 +1059,12 @@ bool WebServer::start() {
                             conflict["client_id"] = key;
                             socket->sendText(conflict.dump());
                         } else {
-                            session->input_channels.store(std::clamp(input, 1u, CM5_MAX_CHANNELS), std::memory_order_relaxed);
-                            session->output_channels.store(std::clamp(output, 1u, CM5_MAX_CHANNELS), std::memory_order_relaxed);
+                            unsigned finalIn = std::clamp(input, 1u, CM5_MAX_CHANNELS);
+                            unsigned finalOut = std::clamp(output, 1u, CM5_MAX_CHANNELS);
+                            session->input_channels.store(finalIn, std::memory_order_relaxed);
+                            session->output_channels.store(finalOut, std::memory_order_relaxed);
+                            session->incoming_rb.init(ma_format_f32, finalIn, 48000);
+                            session->outgoing_rb.init(ma_format_f32, finalOut, 48000);
                             nlohmann::json accepted;
                             accepted["type"] = "identity_accepted";
                             accepted["client_id"] = session->get_client_key();

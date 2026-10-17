@@ -11,7 +11,7 @@
 
 // CONFIGURATION
 #define CM5_ENABLE_PROBES 0
-#define CM5_ENABLE_HW_INFO_DUMP 1
+#define CM5_ENABLE_HW_INFO_DUMP 0
 
 HardwareDevice::HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId)
     : m_info(info), m_context(context), m_originalId(originalId) {
