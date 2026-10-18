@@ -1,63 +1,113 @@
-#include "miniaudio.h"
 #include "web_server.h"
 #include "device_manager.h"
 #include "dsp_engine.h"
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cmath>
 #include <csignal>
-#include <cstring>
+#include <cerrno>
+#include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
-#include <thread>
 #include <memory>
+#include <poll.h>
+#include <stdexcept>
+#include <unistd.h>
 
-std::atomic<bool> g_running(true);
-AudioMetrics g_metrics;
-AudioControls g_controls;
-ToneControls g_tone;
-ClientManager g_clientMgr;
-DeviceManager g_deviceMgr;
-std::unique_ptr<DspEngine> g_dspEngine;
+namespace {
+volatile sig_atomic_t shutdownRequested = 0;
+volatile sig_atomic_t signalWriteFd = -1;
 
-void signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) g_running = false;
+void signal_handler(int) {
+    const int savedErrno = errno;
+    shutdownRequested = 1;
+    const unsigned char byte = 1;
+    if (signalWriteFd >= 0) {
+        const auto ignored = ::write(static_cast<int>(signalWriteFd), &byte, 1);
+        (void)ignored; // Nonblocking self-pipe; the flag also covers a full pipe.
+    }
+    errno = savedErrno;
+}
+
+class ShutdownNotification {
+public:
+    ShutdownNotification() {
+        if (::pipe2(m_pipe, O_NONBLOCK | O_CLOEXEC) != 0)
+            throw std::runtime_error("Cannot create shutdown notification pipe");
+        signalWriteFd = m_pipe[1];
+        struct sigaction action {};
+        action.sa_handler = signal_handler;
+        sigemptyset(&action.sa_mask);
+        if (::sigaction(SIGINT, &action, nullptr) != 0 || ::sigaction(SIGTERM, &action, nullptr) != 0)
+            throw std::runtime_error("Cannot install shutdown signal handlers");
+        // Peer disconnect must be a transport error, not process termination.
+        struct sigaction ignore {};
+        ignore.sa_handler = SIG_IGN;
+        sigemptyset(&ignore.sa_mask);
+        ::sigaction(SIGPIPE, &ignore, nullptr);
+    }
+    ~ShutdownNotification() {
+        signalWriteFd = -1;
+        ::close(m_pipe[0]);
+        ::close(m_pipe[1]);
+    }
+    void wait() const {
+        struct pollfd descriptor {m_pipe[0], POLLIN, 0};
+        ::poll(&descriptor, 1, 100);
+    }
+private:
+    int m_pipe[2]{-1, -1};
+};
+
+int port_from_env(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return fallback;
+    size_t used = 0;
+    const std::string text(value);
+    const int port = std::stoi(text, &used);
+    if (used != text.size() || port < 0 || port > 65535)
+        throw std::invalid_argument(std::string("Invalid port: ") + name);
+    return port;
+}
 }
 
 int main(int argc, char** argv) {
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
-
-    bool plainText = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--plain-text") plainText = true;
+    try {
+        // Install handlers before any backend constructor can create threads.
+        ShutdownNotification shutdown;
+        bool plainText = false, noAudio = false;
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument(argv[i]);
+            if (argument == "--plain-text") plainText = true;
+            else if (argument == "--no-audio") noAudio = true;
+            else throw std::invalid_argument("Unknown argument: " + argument);
+        }
+        const int httpPort = port_from_env("CM5AUDIO_HTTP_PORT", 8182);
+        const int wsPort = port_from_env("CM5AUDIO_WS_PORT", 8183);
+        std::cout << "Starting cm5audio..." << std::endl;
+        DeviceManager devices(!noAudio);
+        if (shutdownRequested) return 0;
+        if (!noAudio) devices.enumerate_devices();
+        if (shutdownRequested) return 0;
+        AudioMetrics metrics;
+        AudioControls controls;
+        ToneControls tone;
+        ClientManager clients;
+        clients.set_device_manager(&devices);
+        auto engine = std::make_unique<DspEngine>(devices, clients, metrics, tone);
+        clients.set_dsp_engine(engine.get());
+        clients.load_settings(controls, tone);
+        if (shutdownRequested) { clients.set_dsp_engine(nullptr); return 0; }
+        engine->start();
+        WebServer server(metrics, controls, tone, clients, devices, *engine, httpPort, wsPort, plainText);
+        if (!server.start()) { clients.set_dsp_engine(nullptr); return 1; }
+        while (!shutdownRequested && server.is_running()) shutdown.wait();
+        std::cout << "[Shutdown] Quiescing control, DSP, network and sessions" << std::endl;
+        server.stop();
+        clients.set_dsp_engine(nullptr);
+        engine.reset(); // Release graph owners before hardware/context teardown.
+        devices.stop_all();
+        std::cout << "[Shutdown] Application workers stopped; releasing audio context" << std::endl;
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "cm5audio: " << error.what() << std::endl;
+        return 1;
     }
-
-    std::cout << "Starting CM5 Audio Network Patchbay..." << std::endl;
-
-    // Enumerate hardware before restoring its activation state.
-    g_deviceMgr.enumerate_devices();
-    std::cout << "Detected " << g_deviceMgr.get_available_devices().size() << " devices." << std::endl;
-    g_clientMgr.set_device_manager(&g_deviceMgr);
-
-    // Construct and link DSP before loading settings, but start processing only after
-    // restoration. Otherwise saved route chains are skipped and graph changes never
-    // notify the engine through ClientManager::mark_graph_dirty().
-    const auto discovery = ProcessorRegistry::instance().discovery();
-    std::cout << "[DSP] Registered processors: " << discovery["processors"].size() << std::endl;
-    g_dspEngine = std::make_unique<DspEngine>(g_deviceMgr, g_clientMgr, g_metrics, g_tone);
-    g_clientMgr.set_dsp_engine(g_dspEngine.get());
-    g_clientMgr.load_settings(g_controls, g_tone);
-    g_dspEngine->start();
-
-    WebServer webServer(g_metrics, g_controls, g_tone, g_clientMgr, g_deviceMgr, *g_dspEngine, 8182, 8183, plainText);
-    if (!webServer.start()) return -1;
-
-    std::cout << "Operational: http://192.168.168.172:8182/" << std::endl;
-    while (g_running) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    g_dspEngine->stop();
-    webServer.stop();
-    return 0;
 }

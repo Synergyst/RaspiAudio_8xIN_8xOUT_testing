@@ -123,7 +123,56 @@ context.discoveryResponse = { schema_version: 1, max_chain_length: 16, processor
     assert.equal(state('editingRouteId'), 1);
     assert.match(elements.get('route-error').textContent, /server rejected draft/);
     assert.equal(state('modalBusy'), false);
+    // A successful APPLY is one whole-state request, confirmed before closing.
+    run('fetchAPI = async () => discoveryResponse;');
+    await run('loadDspAvailable()');
+    context.requests = [];
+    run('loadGraph = async () => {}; fetchAPI = async (url, options) => { requests.push({url, options}); const body = JSON.parse(options.body); return {...body.dsp,status:"ok",adopted:true}; };');
+    await run('saveRoute()');
+    assert.equal(context.requests.length, 1);
+    assert.equal(context.requests[0].url, '/api/routes/1/apply');
+    assert.equal(state('editingRouteId'), null);
+    const appliedBody = JSON.parse(context.requests[0].options.body);
+    assert.equal(appliedBody.gain, 0);
+    assert.equal(appliedBody.enabled, true);
+    assert.equal(appliedBody.dsp.gain, 0);
+    // Accepted-but-unconfirmed state stays open, with no success claim.
+    run('editingRouteId = 1; currentRouteDspState = {active:false,gain:1,chain:[]}; fetchAPI = async () => ({status:"pending",adopted:false});');
+    await run('saveRoute()');
+    assert.equal(state('editingRouteId'), 1);
+    assert.match(elements.get('route-error').textContent, /not confirm/);
+    run('closeModal();');
+    context.requests.length = 0;
+    context.alerts = [];
+    context.alert = value => context.alerts.push(value);
+    run('fetchAPI = async (url, options) => { requests.push({url,options}); return {status:"ok",adopted:true,persisted:true}; };');
+    await run('saveSettings()');
+    assert.equal(context.requests.length, 1);
+    assert.equal(context.requests[0].url, '/api/settings/save');
+    assert.equal(context.requests[0].options.body, undefined);
+    assert.deepEqual(context.alerts, ['Applied configuration saved']);
+    run('fetchAPI = async () => ({status:"ok",adopted:true,persisted:false});');
+    await run('saveSettings()');
+    assert.match(context.alerts[1], /not confirmed/);
+    // Original transport functions serialize mutations; failed calls do not
+    // poison subsequent updates, and SAVE cannot overtake an earlier APPLY.
+    run('fetchAPI = ' + source.match(/function fetchAPI\([\s\S]*?\n        }/)[0].replace('function fetchAPI', 'function'));
+    context.calls = [];
+    context.releaseFirst = null;
+    context.fetch = async url => {
+        context.calls.push(url);
+        if (url === '/first') await new Promise(resolve => { context.releaseFirst = resolve; });
+        return {ok:true,status:200,json:async () => ({status:'ok'})};
+    };
+    const first = run('fetchAPI("/first", {method:"POST"})');
+    const second = run('fetchAPI("/second", {method:"POST"})');
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(context.calls, ['/first']);
+    context.releaseFirst();
+    await first; await second;
+    assert.deepEqual(context.calls, ['/first', '/second']);
     // Discovery failure disables both adding and APPLY; no hardcoded fallback list.
+    run('fetchAPI = async () => { throw new Error("discovery unavailable"); };');
     await run('loadDspAvailable()');
     assert.equal(state('dspDiscovery.status'), 'error');
     assert.equal(elements.get('dsp-add').disabled, true);

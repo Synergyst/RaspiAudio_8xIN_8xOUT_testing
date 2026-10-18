@@ -1,20 +1,107 @@
 # CM5 Audio Network Patchbay Planner
 
-**Status:** IN PROGRESS  
-**Scope:** Replace the current fixed point-to-point audio behavior with a channel-level, network-capable audio patchbay and matrix mixer.  
-**Last reviewed:** 2026-08-30
+**Current status:** P0 implemented and isolated regressions passed. On 2026-10-17 the user confirmed both Ctrl+C shutdown and hot-apply/hot-save work in their normal setup. Comprehensive device/backend qualification remains open.
+**Scope:** Reliable acceptance/adoption/save semantics, endpoint/session ownership,
+finite stable identities and shutdown; not a completed production-hardening claim.
+**Operational reference:** [README.md](README.md), [docs/PLUGINS.md](docs/PLUGINS.md),
+and current source/tests. The long roadmap below is explicitly archived.
 
-## Current status
+## Current reliable scope and P0 implementation register
 
-The MVP dashboard now includes hardware and client channel meters, per-channel history graphs, optional raw numeric values with explicit visible/hidden state, tone injection controls, route management, one SAVE SETTINGS workflow, and a working `--plain-text` HTTP/WS mode for trusted-LAN development. Settings and route restoration are implemented and user-confirmed.
+The application is now a channel-level visual patchbay with independent hardware,
+tone and client endpoints; explicit fan-in/fan-out routes; a compiled-in C++ DSP
+registry/discovery/editor; endpoint meters; and raw WebSocket PCM. It is **not**
+the original fixed duplex input-N-to-output-N prototype. There are no implicit
+routes or mandatory local DAC transit. The dashboard does not currently provide
+the old per-channel history charts or raw-value visibility UI.
 
-## Implementation status
+| Area | Implemented now / exact boundary |
+|---|---|
+| Inspector drafts | Gain/enabled/DSP changes stay local. CLOSE/outside click discards them; close is disabled while APPLY/delete is busy. Page mutations are promise-queued so later SAVE cannot overtake APPLY. No compare/diff modal. |
+| APPLY | One JSON `POST /api/routes/{id}/apply` with required `{gain,enabled,dsp}`. Validates the whole request, fills defaults and constructs processors before publication. Invalid DSP does not partially accept route gain. 200 requires engine adoption; APPLY does not save. |
+| Serialized control | POST wrappers hold the shared control mutex through mutation, completion wait, and requested persistence. Legacy route/DSP endpoints remain; DELETE also serializes/waits. Tone/global fields are validated before storing. |
+| Completion | Accepted POST responses carry `accepted_revision`, `adopted_revision`, `adopted`, `persisted`, `persisted_revision`. Wait is up to **1,500 ms**, or ends early if DSP stops. 503 pending can still apply later; it is not rollback. Rejected/stopping requests need not have acceptance fields. DELETE currently omits `persisted_revision`. |
+| SAVE | Top SAVE never reads open/abandoned inspector drafts or unapplied forms. It saves accepted, engine-adopted server state. No adoption: 503 and **no serializer/file write**. Adopted but save failed: 500 with `adopted:true,persisted:false`; the live change remains applied. Device activate/deactivate use adoption then autosave and report failures. |
+| Revisions | Graph GET uses the real requested `revision` plus `adopted_revision` and `persisted_revision`, not hardcoded 1. Progress counters are process-local, not CAS/ETags, disk scene versions or device-render acknowledgements; restored files do not restore counters. |
+| DSP publication | Chain, DSP master gain and bypass/active share a three-slot pinned publication. Ordinary route gain/enabled still use a separate immutable route snapshot; the entire APPLY is not an instantaneous sample-level swap while in flight. DSP block remains **64 frames**, 48 kHz, width 8. |
+| Graph correctness | Revision/dirty handling preserves updates published during rebuild. Disabled/invalid routes do not affect ordering; active hardware and media-ready client endpoints remain scheduled for silence with no enabled routes; short capture reads are zero-filled. **Enabled cycles remain unsupported**, not automatically scheduled/repaired. |
+| Identity/capacity | Endpoint numeric IDs survive disconnect/deactivation; loading registers saved endpoint strings even offline, and same-identity reconnect rebinds handlers. Full endpoint strings, including embedded slashes, are matched. At most **255 non-tone endpoint identities** per process; no unrelated-ID recycling. New registration fails at capacity. Route DSP IDs remain `1..1023`. |
+| WS initialization | Application sessions are created only on **Open**, not TCP accept/pre-upgrade. First hello initializes rings once before readiness. Same identity/channel hello is idempotently accepted; changing identity/channels requires reconnect, not live resize. A new name alone does not rename a ready session. Binary before readiness is ignored. |
+| Ownership/shutdown | One lifecycle owner; signal handler flags/notifies a self-pipe. HTTP acceptance stops and stalled accepted reads are cancelled before worker join; DSP stays alive until HTTP workers finish; WS shutdown handles late accepted workers. Close callbacks queue retirement; an external reaper joins senders. Graph snapshots retain hardware/session owners; last-owner release is control-side. Engine/graph owners are released before hardware/context destruction. |
+| Hardware lifecycle | Negotiated buffers are prepared before device start; initialized devices uninit even after start failure; destruction/joins occur outside manager locks. Vendored miniaudio uninit wakes synchronous backend data loops after terminal state before joining, without a preliminary stop wait when states disagree. ALSA filtering/fallback is backend-guarded. Physical-backend validation remains outstanding. |
+| Settings writer | Serialized unique same-directory `PATH.tmp.XXXXXX`, checked full write loop/file fsync/close/rename, cleanup on failure. No directory fsync or crash rollback/automatic `.bak` recovery. Multiple independent processes are not serialized by this mutex. |
+| Persisted state | Routes/DSP, activated IDs, tone, known names, preserved legacy hardware banks, and optional fixed `global_dsp:{gain,threshold,ratio}`. Older files without global DSP retain defaults. Browser layout/identity storage and negotiated client channels remain outside server settings. |
+| Hardware channel control | `POST /api/control` is **501 explicitly unsupported**, not silently stored as if audible. Existing hardware gain/mute banks load/save for compatibility but still do not process samples. Use route gain or Gain plugin. |
+| Test/runtime isolation | `DeviceManager(false)` / `--no-audio` initializes **no backend**, not even miniaudio null. `CM5AUDIO_HTTP_PORT`, `CM5AUDIO_WS_PORT`, `CM5AUDIO_BIND_ADDRESS` override defaults **8182/8183/0.0.0.0**. HTTP 0 supports assigned-port reporting; use nonzero WS ports, not IX `getPort()` as an ephemeral-port guarantee. |
+| IX compatibility | Local TLS/socket-server objects under `third_party/ixwebsocket/` are linked before the matching installed **static** IX library; bound server TLS handshake waits and fix accepted-fd ownership on failure/stop. No installed libraries changed. Compare source/ABI for another IX version. Project-owned `ReliableWebSocketServer` handles accepted-worker shutdown separately. |
+| Real-time boundary | PCM SPSC rings are RAII/wrap-aware with bounded no-application-lock/allocation reads/writes. The **engine is not zero-allocation or lock-free**: rebuild/snapshots/retirement use locks/containers and meter-map structure is mutex-protected in updates/read/reset. Plugin process methods must still avoid allocation/locking/I/O. |
 
-The first prototype implementation is now in the repository. It provides a server-side route list, local hardware channel routing, client endpoint discovery, client-to-client/server-to-client routing through the CM5 routing process, per-route gain/mute/delete controls, and a dashboard that preserves user edits during refresh.
+### Verification and remaining acceptance work
 
-This is **not all caught up**. The prototype still needs the production graph model, framed channel-aware media protocol, proper real-time thread/queue architecture, complete patchbay interaction design, diagnostics, and remote CM5-instance support described below. The MVP intentionally uses zero authentication on the trusted LAN and now supports `--plain-text` HTTP/WS operation to avoid certificate setup during trusted-LAN development. The statuses in the phase list and register distinguish implemented prototype work from remaining production work.
+- `make test-plugins`: C++ registry/validation/processing, pinned-reader lifetime,
+  HTTP discovery/rejection, persistence and invalid-plugin recovery, plus Node DOM
+  tests. Temporary settings, loopback **28182/28183**, no backend initialization.
+- `make test-reliability`: adds `tests/reliability_test.cpp` (loopback **28184/28185**,
+  45-second timeout) and `tests/shutdown_test.py` (owned `--no-audio` children,
+  temporary settings/certificates, selected nonzero loopback ports).
+- C++ assertions cover ring wrap/RAII, deterministic rebuild race, sample
+  gain/DSP/bypass/disable, slash IDs/reconnect, APPLY validation/adoption,
+  concurrent saves, I/O failure, no-adoption/no-save, and fresh restore/global DSP.
+  Python assertions cover plain/TLS WS samples, SIGINT/SIGTERM under traffic and
+  stalled handshakes, repeated hello/reconnect, idle/startup exits, startup failures,
+  port reuse and next launches. These are coverage intentions, not a claim all
+  checks currently pass.
+- **Observed 2026-10-17:** `make test-plugins` and full `make test-reliability`
+  passed. The latter includes `tests/device_lifecycle_test.cpp` on the null
+  backend and a controlled blocked-loop wakeup regression. Python recorded
+  **21 graceful exits** (loaded plain/TLS signals, ten connection-churn exits,
+  six idle and one early-startup exit), slowest approximately **1.015 s**;
+  tested ports were reusable. Expected invalid-TLS and bind failures also exited.
+  C++ checks include actual samples, 72 concurrent saves, injected short-write
+  failure and fresh restoration. An application-source ASan/UBSan reliability
+  build passed without runtime reports; dependency objects were not instrumented.
+  These results are isolated regression evidence, not physical-backend approval.
+- **Unverified:** physical capture/playback, real backend teardown, multichannel
+  mapping, listening quality, overload and end-to-end latency. No service,
+  installed library, system audio settings, or normal runtime settings were
+  changed by this isolated P0 work/tests. Documentation maintenance itself does
+  not run the server or build/test targets.
 
-The following MVP dashboard items are complete: client meters are displayed below hardware meters, client per-channel history graphs are restored, hardware/client raw-value visibility is explicit and user-confirmed, tone injection controls are available, and settings/routes use one SAVE SETTINGS workflow with automatic startup/reconnection restoration.
+### Current follow-up priorities (not implemented P0 claims)
+
+1. Preserve the now-passing P0 regressions and the user's confirmation of Ctrl+C
+   and hot-apply/hot-save. Arrange broader device/backend and physical-path tests
+   explicitly; do not infer universal compatibility from this successful setup.
+2. Define/reject cycles and validate actual endpoint direction/channel capability;
+   improve capacity diagnostics without claiming unbounded ID reuse.
+3. Move graph construction off the processing path and measure/remove remaining
+   locks/allocations; retain the **64-frame** engine policy.
+4. Add framed media, sample-rate/format negotiation, jitter/drift handling and
+   transport diagnostics; raw PCM WebSocket media remains current.
+5. Implement hardware sample gain/mute or retain the explicit 501 boundary; improve
+   global form hydration and full meter peak/clip semantics.
+6. Future persistence crash rollback/previous-good recovery and parent-directory
+   durability, plus a draft/applied comparison modal, are **deferred requirements**.
+7. Protect private-key download/static routes and add enforceable access control
+   before any untrusted-network deployment. Authentication is still absent.
+8. Remote instances, scenes/import/atomic graph replacement, peer media paths,
+   arbitrary-width audio and external plugin hosting remain roadmap items.
+
+---
+
+# Archived long-term roadmap — historical, NOT current status
+
+> The sections numbered 1–17 below retain the earlier product/design roadmap and
+> historical phase/register notes for context. **All statuses, “current” wording,
+> completed-prototype claims and proposed constants in this archive are historical**;
+> they are not current acceptance results or operational instructions. For example,
+> a proposed 480-frame quantum, default matching-channel wiring, per-channel history
+> charts, or old callback/control behavior must not override the current 64-frame,
+> explicit-route implementation described above. The obsolete fixed-topology
+> baseline has been replaced with a pointer rather than retained as a second
+> contradictory current description. Reconcile a roadmap item with source and
+> [README.md](README.md) before implementing it; do not treat archival statuses as
+> a present TODO/completion checklist.
 
 ## 1. Purpose and product goal
 
@@ -50,67 +137,13 @@ The graph must support all of the following:
 
 The example “route all eight channels to a client's left channel” is one valid graph configuration, not a special case and not the primary model. The same system must support arbitrary channel counts and arbitrary source/destination combinations.
 
-## 2. Current implementation baseline
+## 2. Historical baseline — superseded
 
-The existing project is a useful prototype but currently implements a fixed audio topology.
-
-### 2.1 Local hardware
-
-`src/main.cpp` creates one miniaudio duplex device configured for:
-
-- 8 capture channels.
-- 8 playback channels.
-- 48 kHz.
-- `float32` samples.
-
-The current callback applies capture gain/mute and playback gain/mute, then assigns each processed input channel to the same-numbered hardware output channel:
-
-```text
-hardware input N -> hardware output N
-```
-
-There is no general local matrix.
-
-### 2.2 Browser/client transport
-
-`WebClientSession` currently contains:
-
-- One mono incoming ring buffer for client microphone data.
-- One stereo outgoing ring buffer for server-to-client data.
-
-The server currently sends the same local output channels 1 and 2 to every client, and mixes every client's mono input into local hardware playback channel 1. In simplified form:
-
-```text
-local output 1/2 -> every client
-client microphone -> local hardware output 1
-```
-
-The WebSocket payload is raw binary PCM without an audio header, stream identifier, sequence number, timestamp, channel count, or explicit frame count.
-
-### 2.3 Existing web/API layer
-
-The HTTP dashboard on port `8182` currently exposes:
-
-- `/api/meters` and `/api/metrics` for fixed eight-channel capture/playback meters.
-- `/api/control` for global capture/playback gain and mute.
-- `/api/reset_clips` for fixed channel clip/peak reset.
-- `/client` for static browser client assets.
-
-The WSS listener on port `8183` creates sessions, but there is currently no client enumeration API, route API, graph API, node identity model, or control protocol.
-
-### 2.4 Existing real-time risks
-
-The current callback performs operations that should not remain in a production low-latency path:
-
-- Dynamic allocation of vectors each callback.
-- Session-vector creation and mutex acquisition in the callback.
-- Mutex-protected ring-buffer access in the callback.
-- Potentially blocking or expensive work associated with client iteration.
-- No explicit handling for variable callback frame sizes or network jitter.
-- Client output is sent only in response to an incoming client message.
-- Shutdown detaches the HTTP thread.
-
-The routing work must not simply add more locks, allocations, or per-route complexity to this callback. The new design should isolate network/control work from deterministic audio processing.
+The original fixed duplex-device, input-N-to-output-N, mono-client-tap baseline
+has been removed from the current status description: it does **not** describe
+the source now. There is no implicit matching-channel route or mandatory local
+DAC transit. Use the current P0 register above and [README.md](README.md) for the
+implemented independent endpoints, graph, controls, ownership and limitations.
 
 ## 3. Core concepts and terminology
 
@@ -803,7 +836,7 @@ Verify that an operator can:
 9. Observe disconnected nodes and route state clearly.
 10. Reload the graph and recover from a missed event.
 
-## 15. Implementation phases
+## 15. Historical implementation phases — archived statuses
 
 ### Phase 0 — Documentation and decisions
 
@@ -922,7 +955,7 @@ Verify that an operator can:
 - Production exposure to untrusted networks without authentication.
 - Treating WebSocket/TCP as the final low-latency transport without measurement.
 
-## 17. Current TODO / PLANNED / DEPRECATING / NEEDREVIEW register
+## 17. Archived TODO / PLANNED / DEPRECATING / NEEDREVIEW register
 
 Use these tags consistently in this file and in future planning notes:
 
@@ -950,7 +983,7 @@ Use these tags consistently in this file and in future planning notes:
 - PLANNED: Add graph revisioning, live graph events, and scene loading beyond the current settings file.
 - PLANNED: Add remote CM5-instance nodes and instance-to-instance media streams.
 
-### COMPLETED IN PROTOTYPE
+### HISTORICAL COMPLETED-IN-PROTOTYPE NOTES — not current UI claims
 
 - COMPLETED: User-confirmed fix for hardware raw-value checkbox visibility logic; unchecked hides raw values and checked shows them.
 - COMPLETED: User-confirmed compact client meter formatting and client per-channel history graphs.

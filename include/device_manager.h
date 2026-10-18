@@ -8,6 +8,7 @@
 
 #include "constants.h"
 #include "ring_buffer.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <memory>
@@ -18,21 +19,24 @@
 using NodeId = int32_t;
 
 struct AudioDeviceInfo {
-    ma_device_id id;
+    ma_device_id id{};
     std::string name;
-    bool is_capture;
-    unsigned channels;
-    unsigned sample_rate;
+    bool is_capture = false;
+    unsigned channels = 0;
+    unsigned sample_rate = 0;
 };
 
 class HardwareDevice {
 public:
     HardwareDevice(const AudioDeviceInfo& info, ma_context* context, const std::string& originalId);
     ~HardwareDevice();
+    HardwareDevice(const HardwareDevice&) = delete;
+    HardwareDevice& operator=(const HardwareDevice&) = delete;
 
+    // Lifecycle calls are serialized by the owner, never by the audio callback.
     bool init();
     void stop();
-    
+
     const AudioDeviceInfo& get_info() const { return m_info; }
     PcmRingBuffer& get_input_buffer() { return m_input_rb; }
     PcmRingBuffer& get_output_buffer() { return m_output_rb; }
@@ -41,15 +45,17 @@ public:
     // Node ID tracking for zero-allocation routing
     NodeId node_id = -1;
 
-    // Pre-allocated buffers for zero-allocation I/O
+    // Prepared before device start; never resized while callbacks/DSP use it.
     std::vector<float> io_buffer;
 
 private:
+    friend struct HardwareDeviceTestAccess;
     static void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 
     AudioDeviceInfo m_info;
     ma_context* m_context;
-    ma_device m_device;
+    ma_device m_device{};
+    bool m_device_initialized = false;
     PcmRingBuffer m_input_rb;
     PcmRingBuffer m_output_rb;
     std::string m_originalId;
@@ -57,9 +63,11 @@ private:
 
 class DeviceManager {
 public:
-    DeviceManager();
+    explicit DeviceManager(bool initializeBackend = true);
     ~DeviceManager();
 
+    bool initialized() const { return m_context_initialized; }
+    bool is_initialized() const { return initialized(); }
     void enumerate_devices();
     std::vector<AudioDeviceInfo> get_available_devices();
     std::vector<std::shared_ptr<HardwareDevice>> get_active_devices();
@@ -68,10 +76,14 @@ public:
     void stop_all();
 
 private:
+    friend struct DeviceManagerTestAccess;
     std::mutex m_lock;
-    ma_context m_context;
+    ma_context m_context{};
+    bool m_context_initialized = false;
+    // Invalidates in-flight activations when a removal/stop races device init.
+    std::uint64_t m_activation_generation = 0;
     std::vector<AudioDeviceInfo> m_available_devices;
-    // Key is now "ID_capture" or "ID_playback" to support duplex devices
+    // Key is "ID_capture" or "ID_playback" to support duplex devices.
     std::unordered_map<std::string, std::shared_ptr<HardwareDevice>> m_active_devices;
 };
 

@@ -16,6 +16,7 @@
 
 namespace ix { class WebSocket; class WebSocketServer; }
 namespace httplib { class Server; class SSLServer; }
+class ReliableWebSocketServer;
 
 using NodeId = int32_t;
 const NodeId NODE_INVALID = -1;
@@ -36,11 +37,13 @@ struct ChannelControl {
 };
 
 struct AudioMetrics {
+    mutable std::mutex lock; // Protect map structure; channel values remain atomic.
     std::unordered_map<std::string, std::array<ChannelMeter, CM5_MAX_CHANNELS>> capture;
     std::unordered_map<std::string, std::array<ChannelMeter, CM5_MAX_CHANNELS>> playback;
 };
 
 struct AudioControls {
+    mutable std::mutex lock;
     std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CHANNELS>> capture;
     std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CHANNELS>> playback;
 };
@@ -67,6 +70,8 @@ struct WebClientSession {
     std::array<ChannelMeter, CM5_MAX_CHANNELS> output_metrics;
     std::vector<float> packet_block;
     std::atomic<bool> active{true};
+    std::atomic<bool> media_ready{false};
+    std::weak_ptr<ix::WebSocket> socket;
     std::thread sender_thread;
 
     std::string get_client_key() const;
@@ -93,6 +98,10 @@ class DspEngine;
 class ClientManager {
 public:
     ClientManager();
+    ~ClientManager();
+    std::recursive_mutex& control_mutex() const { return m_control_lock; }
+    void collect_retired_sessions();
+    void stop_sessions();
     void set_device_manager(DeviceManager* dm) { m_deviceManager = dm; }
     void set_dsp_engine(DspEngine* dsp) { m_dspEngine = dsp; }
     std::shared_ptr<WebClientSession> create_session(uint32_t id, const std::string& remoteIp = "");
@@ -119,6 +128,8 @@ public:
 
 private:
     bool endpoint_exists(const std::string& endpoint, bool source) const;
+    mutable std::recursive_mutex m_control_lock;
+    std::vector<std::shared_ptr<WebClientSession>> m_retired_sessions;
     mutable std::mutex m_lock;
     std::vector<std::shared_ptr<WebClientSession>> m_sessions;
     mutable std::mutex m_route_lock;
@@ -144,6 +155,9 @@ public:
     ~WebServer();
     bool start();
     void stop();
+    bool is_running() const { return m_running.load(); }
+    int http_port() const { return m_httpPort; }
+    int ws_port() const { return m_wsPort; }
 
 private:
     AudioMetrics& m_metrics;
@@ -156,12 +170,14 @@ private:
     int m_wsPort;
     bool m_plainText;
     std::atomic<bool> m_running{false};
+    std::mutex m_lifecycleLock;
+    uint64_t m_persistedRevision = 0;
     
     std::unique_ptr<httplib::Server> m_httpServer;
-    std::unique_ptr<ix::WebSocketServer> m_wsServer;
+    std::unique_ptr<ReliableWebSocketServer> m_wsServer;
     
     std::thread m_httpThread;
-    std::thread m_wsThread;
+    std::thread m_sessionReaper;
 };
 
 #endif

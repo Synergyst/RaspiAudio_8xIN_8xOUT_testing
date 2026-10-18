@@ -5,6 +5,9 @@
 #include "web_server.h"
 #include "constants.h"
 #include <thread>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <atomic>
 #include <vector>
 #include <mutex>
@@ -261,17 +264,32 @@ public:
 
     void start();
     void stop();
-    void mark_graph_dirty() { m_graphDirty.store(true, std::memory_order_release); }
+    bool is_running() const { return m_running.load(std::memory_order_acquire); }
+
+    // Publish state before requesting adoption. A revision is acknowledged only
+    // after a complete audio block has finished using the adopted state.
+    uint64_t mark_graph_dirty();
+    uint64_t request_adoption() { return mark_graph_dirty(); }
+    uint64_t requested_revision() const { return m_requestedRevision.load(std::memory_order_acquire); }
+    uint64_t adopted_revision() const { return m_adoptedRevision.load(std::memory_order_acquire); }
+    bool wait_for_revision(uint64_t revision, std::chrono::milliseconds timeout);
+
+    // Control-thread only. Final device/session destruction must never run on
+    // the audio worker; stop() also drains all retained endpoint ownership.
+    void collect_retired_endpoints();
 
     GainProcessor* get_gain_processor() { return m_gainProc.get(); }
     CompressorProcessor* get_compressor() { return m_compProc.get(); }
     bool supports_route_dsp(uint32_t routeId) const { return routeId > 0 && routeId < MAX_ROUTES; }
 
-    void set_route_dsp_active(uint32_t routeId, bool active);
-    void set_route_gain(uint32_t routeId, float gain);
-    void update_route_chain(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain);
+    // Construction, publication and reclamation of processors are control-side.
+    // Chain, gain and bypass state are one indivisible audio-side publication.
+    void update_route_dsp(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain,
+                          float gain, bool active);
 
 private:
+    friend struct DspEngineTestAccess;
+
     void processing_loop();
     void process_audio();
     void rebuild_graph();
@@ -294,6 +312,24 @@ private:
     int m_nodePosition[MAX_NODES];
     NodeHandler m_nodeHandlers[MAX_NODES];
     std::atomic<bool> m_graphDirty{true};
+    std::atomic<uint64_t> m_requestedRevision{1};
+    std::atomic<uint64_t> m_adoptedRevision{0};
+    uint64_t m_builtRevision = 0; // Audio-thread only (or after join).
+    std::mutex m_revisionWaitLock;
+    std::condition_variable m_revisionChanged;
+
+    struct EndpointOwners {
+        std::vector<std::shared_ptr<HardwareDevice>> hardware;
+        std::vector<std::shared_ptr<WebClientSession>> sessions;
+        bool empty() const { return hardware.empty() && sessions.empty(); }
+    };
+    EndpointOwners m_endpointOwners;
+    std::mutex m_retiredEndpointsLock;
+    std::vector<EndpointOwners> m_retiredEndpointOwners;
+
+    // Installed only by the friend test accessor while the worker is stopped.
+    // Runs after taking graph snapshots, before publishing the rebuilt graph.
+    std::function<void()> m_rebuildGraphTestHook;
 
     std::shared_ptr<const std::vector<AudioRoute>> m_currentRoutes;
     std::vector<const AudioRoute*> m_adjList[MAX_NODES];
@@ -302,6 +338,8 @@ private:
         struct Chain {
             std::unique_ptr<AudioProcessor> processors[CM5_MAX_PROCESSORS_PER_ROUTE];
             int length = 0;
+            float gain = 1.0f;
+            bool active = false;
         };
         // Three slots guarantee a writable slot even while the audio reader holds an
         // older publication. Only the control thread creates/destroys processors.
@@ -309,8 +347,6 @@ private:
         std::atomic<int> current_idx{0};
         std::atomic<int> reader_idx{-1};
         std::mutex writer_lock;
-        std::atomic<float> gain{1.0f};
-        std::atomic<bool> active{false};
     };
     RouteDsp m_routeDsp[MAX_ROUTES];
     std::vector<float> m_routeScratchBuffer;

@@ -44130,6 +44130,13 @@ MA_API void ma_device_uninit(ma_device* pDevice)
 
     /* Wake up the worker thread and wait for it to properly terminate. */
     if (!ma_context_is_backend_asynchronous(pDevice->pContext)) {
+        /* cm5audio local fix: a backend data loop (notably ALSA poll()) can be
+        waiting on its own interrupt rather than wakeupEvent. State is already
+        uninitialized, so waking it cannot resume processing. Do not first call
+        ma_device_stop(): backend/state mismatch can make that wait indefinitely. */
+        if (pDevice->pContext->callbacks.onDeviceDataLoopWakeup != NULL) {
+            pDevice->pContext->callbacks.onDeviceDataLoopWakeup(pDevice);
+        }
         ma_event_signal(&pDevice->wakeupEvent);
         ma_thread_wait(&pDevice->thread);
     }

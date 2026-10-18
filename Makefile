@@ -10,7 +10,11 @@ APP_OBJS = $(APP_SRCS:src/%.cpp=build/%.o)
 MINIAUDIO_SRC = src/miniaudio_impl.cpp
 MINIAUDIO_OBJ = build/miniaudio_impl.o
 
-OBJS = $(APP_OBJS) $(MINIAUDIO_OBJ)
+IX_TLS_OBJ = build/ix_tls_shutdown.o
+IX_SERVER_OBJ = build/ix_socket_server_shutdown.o
+IX_WS_OBJ = build/ix_websocket_server_shutdown.o
+IX_COMPAT_OBJS = $(IX_TLS_OBJ) $(IX_SERVER_OBJ) $(IX_WS_OBJ)
+OBJS = $(APP_OBJS) $(MINIAUDIO_OBJ) $(IX_COMPAT_OBJS)
 TARGET = cm5audio
 
 CAPS_OBJ = build/alsa_caps.o
@@ -21,16 +25,29 @@ TEST_TARGET = alsa_bridge_test
 
 PLUGIN_TEST_OBJ = build/dsp_plugins_test.o
 PLUGIN_TEST_TARGET = build/dsp_plugins_test
-PLUGIN_TEST_DEPS = $(filter-out build/main.o,$(APP_OBJS)) $(MINIAUDIO_OBJ)
+PLUGIN_TEST_DEPS = $(filter-out build/main.o,$(APP_OBJS)) $(MINIAUDIO_OBJ) $(IX_COMPAT_OBJS)
 
 all: build $(TARGET)
 
 build:
 	mkdir -p build
 
+# The retained legacy miniaudio object may lack a generated .d file. Always
+# rebuild it when its vendored header changes (including lifecycle fixes).
+$(MINIAUDIO_OBJ): include/miniaudio.h
+
 # Track headers so editing/registering a C++ processor rebuilds every affected object.
 build/%.o: src/%.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(IX_TLS_OBJ): third_party/ixwebsocket/IXSocketOpenSSL.cpp | build
+	$(CXX) $(CXXFLAGS) -DIXWEBSOCKET_USE_OPEN_SSL -DIXWEBSOCKET_USE_TLS -DIXWEBSOCKET_USE_ZLIB -MMD -MP -c $< -o $@
+
+$(IX_SERVER_OBJ): third_party/ixwebsocket/IXSocketServer.cpp | build
+	$(CXX) $(CXXFLAGS) -DIXWEBSOCKET_USE_OPEN_SSL -DIXWEBSOCKET_USE_TLS -DIXWEBSOCKET_USE_ZLIB -MMD -MP -c $< -o $@
+
+$(IX_WS_OBJ): third_party/ixwebsocket/IXWebSocketServer.cpp | build
+	$(CXX) $(CXXFLAGS) -DIXWEBSOCKET_USE_OPEN_SSL -DIXWEBSOCKET_USE_TLS -DIXWEBSOCKET_USE_ZLIB -MMD -MP -c $< -o $@
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
@@ -47,6 +64,23 @@ $(TEST_TARGET): $(TEST_OBJ)
 $(PLUGIN_TEST_OBJ): tests/dsp_plugins_test.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
+build/reliability_test.o: tests/reliability_test.cpp | build
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+build/reliability_test: build/reliability_test.o $(PLUGIN_TEST_DEPS)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+build/device_lifecycle_test.o: tests/device_lifecycle_test.cpp | build
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+build/device_lifecycle_test: build/device_lifecycle_test.o build/device_manager.o $(MINIAUDIO_OBJ)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+test-reliability: $(TARGET) build/reliability_test build/device_lifecycle_test
+	CM5AUDIO_BIND_ADDRESS=127.0.0.1 timeout 45 ./build/reliability_test
+	timeout 20 ./build/device_lifecycle_test
+	python3 tests/shutdown_test.py
+
 $(PLUGIN_TEST_TARGET): $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_DEPS)
 	$(CXX) $^ -o $@ $(LDFLAGS)
 
@@ -56,7 +90,7 @@ test-plugins: $(PLUGIN_TEST_TARGET)
 	node tests/dashboard_plugins_test.js
 
 clean:
-	rm -f $(APP_OBJS) $(APP_OBJS:.o=.d) $(TARGET) $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_OBJ:.o=.d) $(PLUGIN_TEST_TARGET)
+	rm -f $(APP_OBJS) $(APP_OBJS:.o=.d) $(TARGET) $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_OBJ:.o=.d) $(PLUGIN_TEST_TARGET) build/reliability_test.o build/reliability_test.d build/reliability_test build/device_lifecycle_test.o build/device_lifecycle_test.d build/device_lifecycle_test $(IX_COMPAT_OBJS) build/ix_tls_shutdown.d build/ix_socket_server_shutdown.d build/ix_websocket_server_shutdown.d
 
 clean-miniaudio:
 	rm -f $(MINIAUDIO_OBJ) $(MINIAUDIO_OBJ:.o=.d)
@@ -66,4 +100,4 @@ clean-alsatools:
 
 -include $(wildcard build/*.d)
 
-.PHONY: all clean clean-miniaudio clean-alsatools alsatools test-plugins
+.PHONY: all clean clean-miniaudio clean-alsatools alsatools test-plugins test-reliability

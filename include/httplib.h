@@ -2385,8 +2385,11 @@ private:
                          FormDataHeader multipart_header,
                          ContentReceiver multipart_receiver) const;
 
+protected:
+  // cm5audio: permit a serving wrapper to track/cancel accepted connections.
   virtual bool process_and_close_socket(socket_t sock);
 
+private:
   void output_log(const Request &req, const Response &res) const;
   void output_pre_compression_log(const Request &req,
                                   const Response &res) const;
@@ -3279,9 +3282,11 @@ public:
 
   int ssl_last_error() const { return last_ssl_error_; }
 
-private:
+protected:
+  // cm5audio: same accepted-connection wrapper for TLS and plain HTTP.
   bool process_and_close_socket(socket_t sock) override;
 
+private:
   tls::ctx_t ctx_ = nullptr;
   std::mutex ctx_mutex_;
 

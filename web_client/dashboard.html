@@ -546,7 +546,7 @@
         </div>
 
         <div class="toolbar" style="justify-content: flex-end; margin-top: 18px; border-top: 1px solid var(--border-color); padding-top: 12px;">
-            <button id="route-cancel" onclick="closeModal()">CANCEL</button>
+            <button id="route-cancel" onclick="closeModal()">CLOSE</button>
             <button id="route-apply" class="primary" onclick="saveRoute()" disabled>APPLY</button>
             <button id="route-delete" style="background: var(--accent-red)" onclick="deleteRoute()">DELETE ROUTE</button>
         </div>
@@ -830,15 +830,26 @@
             setTimeout(() => { el.style.display = 'none'; }, 5000);
         }
 
-        async function fetchAPI(url, options = {}) {
+        let mutationQueue = Promise.resolve();
+        function fetchAPI(url, options = {}) {
+            if ((options.method || 'GET').toUpperCase() === 'GET') return requestAPI(url, options);
+            const result = mutationQueue.then(() => requestAPI(url, options));
+            mutationQueue = result.catch(() => {});
+            return result;
+        }
+
+        async function requestAPI(url, options = {}) {
             const absoluteUrl = url.startsWith('/') ? url : '/' + url;
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 5000);
             try {
                 const res = await fetch(absoluteUrl, { ...options, signal: controller.signal });
                 clearTimeout(timeout);
-                if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-                return await res.json();
+                const body = await res.json();
+                if (!res.ok || (body.status && body.status !== 'ok')) {
+                    throw new Error(body.message || `HTTP ${res.status}`);
+                }
+                return body;
             } catch (e) {
                 clearTimeout(timeout);
                 throw e;
@@ -889,6 +900,7 @@
             } catch (e) {
                 console.error('Graph load failed', e);
                 showError('Failed to load routing graph');
+                throw e;
             }
         }
 
@@ -1545,25 +1557,23 @@
             const id = editingRouteId;
             modalBusy = true;
             updateModalControls();
-            let dspSaved = false;
             let saved = false;
+            let adopted = false;
             try {
-                // Validate/save DSP first: a rejected chain must not change route gain or enabled.
-                const result = await fetchAPI(`/api/routes/${encodeURIComponent(id)}/dsp`, {
+                const result = await fetchAPI(`/api/routes/${encodeURIComponent(id)}/apply`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(draft.dsp)
+                    body: JSON.stringify(draft)
                 });
-                if (result.status !== 'ok') throw new Error('The backend did not confirm the DSP update.');
-                dspSaved = true;
+                if (result.status !== 'ok' || result.adopted !== true)
+                    throw new Error('The backend did not confirm engine adoption.');
+                adopted = true;
                 showDspState(readDspState(result));
                 $('dsp-route-warning').hidden = true;
-                const params = new URLSearchParams({ id, enabled: draft.enabled ? '1' : '0', gain: String(draft.gain) });
-                await fetchAPI(`/api/routes/update?${params.toString()}`, { method: 'POST' });
-                saved = true;
                 await loadGraph();
+                saved = true;
             } catch (e) {
-                setRouteError((dspSaved ? 'DSP was saved, but the remaining route update could not be completed: ' : 'APPLY failed: ') + e.message + '\nThe inspector remains open. Review the values and retry APPLY.');
+                setRouteError((adopted ? 'Changes were applied, but graph confirmation failed: ' : 'APPLY was not confirmed: ') + e.message + '\nThe inspector remains open. Refresh/review the route before retrying.');
             } finally {
                 modalBusy = false;
                 if (saved) closeModal();
@@ -1631,7 +1641,14 @@
         }
 
         async function resetClips() { try { await fetchAPI('/api/reset_clips?all=1', { method: 'POST' }); } catch (e) {} }
-        async function saveSettings() { try { await fetchAPI('/api/settings/save', { method: 'POST' }); alert('Settings Saved'); } catch (e) { alert(e.message); } }
+        async function saveSettings() {
+            try {
+                // Closing the inspector discards its draft. SAVE never reads it.
+                const result = await fetchAPI('/api/settings/save', { method: 'POST' });
+                if (!result.adopted || !result.persisted) throw new Error(result.message || 'Apply/save was not confirmed');
+                alert('Applied configuration saved');
+            } catch (e) { alert(e.message); }
+        }
         async function refreshAll() { await Promise.all([loadGraph(), loadDevices(), loadDspAvailable()]); }
 
         const viewportObserver = new ResizeObserver(() => {

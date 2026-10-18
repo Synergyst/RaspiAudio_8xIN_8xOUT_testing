@@ -1,9 +1,14 @@
 #include "web_server.h"
 #include "dsp_engine.h"
 #include "device_manager.h"
+#include "reliable_websocket_server.h"
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
 #include <nlohmann/json.hpp>
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
+#include "reliable_http_server.h"
 #include <ixwebsocket/IXConnectionState.h>
 #include <ixwebsocket/IXWebSocket.h>
 #include <ixwebsocket/IXWebSocketMessageType.h>
@@ -217,30 +222,59 @@ void WebClientSession::set_identity(const std::string& key, const std::string& n
 }
 
 void WebClientSession::start_sender(const std::shared_ptr<ix::WebSocket>& socket) {
-    sender_thread = std::thread([this, socket] {
-        std::vector<uint8_t> block(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS * sizeof(float));
-        while (active.load(std::memory_order_relaxed)) {
+    // Allocate before launching; allocation failure must not terminate a worker.
+    std::vector<uint8_t> block(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS * sizeof(float));
+    sender_thread = std::thread([this, socket, block = std::move(block)]() mutable {
+        try {
+        while (active.load(std::memory_order_acquire)) {
+            if (!media_ready.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
             const unsigned channels = std::clamp(output_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
             const size_t bytes = CM5_MAX_AUDIO_FRAMES * channels * sizeof(float);
             const size_t got = outgoing_rb.read(block.data(), bytes);
             if (got) socket->sendBinary(std::string(reinterpret_cast<char*>(block.data()), got));
             else std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
+        } catch (const std::exception& error) {
+            active.store(false, std::memory_order_release);
+            std::cerr << "[WS] Sender stopped: " << error.what() << std::endl;
+        }
     });
 }
 
 void WebClientSession::stop_sender() {
-    active.store(false, std::memory_order_relaxed);
-    if (!sender_thread.joinable()) return;
-    if (sender_thread.get_id() == std::this_thread::get_id()) {
-        sender_thread.detach();
-        return;
-    }
-    sender_thread.join();
+    active.store(false, std::memory_order_release);
+    // Called only by the external retirement owner, never by an IX callback.
+    if (sender_thread.joinable()) sender_thread.join();
 }
 
 ClientManager::ClientManager()
     : m_routes(std::make_shared<const std::vector<AudioRoute>>()) {
+}
+
+ClientManager::~ClientManager() { stop_sessions(); }
+
+void ClientManager::collect_retired_sessions() {
+    std::vector<std::shared_ptr<WebClientSession>> retired;
+    {
+        std::lock_guard<std::mutex> lock(m_lock);
+        retired.swap(m_retired_sessions);
+    }
+    for (const auto& session : retired) session->stop_sender();
+}
+
+void ClientManager::stop_sessions() {
+    {
+        std::lock_guard<std::mutex> lock(m_lock);
+        for (const auto& session : m_sessions) {
+            session->active.store(false, std::memory_order_release);
+            m_retired_sessions.push_back(session);
+        }
+        m_sessions.clear();
+    }
+    collect_retired_sessions();
 }
 
 NodeId ClientManager::get_node_id(const std::string& endpoint) const {
@@ -258,12 +292,14 @@ std::string ClientManager::get_endpoint_from_id(NodeId id) const {
 }
 
 NodeId ClientManager::register_node(const std::string& endpoint) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::lock_guard<std::mutex> lock(m_node_lock);
     if (endpoint == "tone/generator") return NODE_TONE_GENERATOR;
     
     auto it = m_endpoint_to_id.find(endpoint);
     if (it != m_endpoint_to_id.end()) return it->second;
     
+    if (m_next_node_id.load() >= 256) return NODE_INVALID;
     NodeId id = m_next_node_id.fetch_add(1);
     m_endpoint_to_id[endpoint] = id;
     m_id_to_endpoint[id] = endpoint;
@@ -272,21 +308,14 @@ NodeId ClientManager::register_node(const std::string& endpoint) {
     return id;
 }
 
-void ClientManager::unregister_node(const std::string& endpoint) {
-    std::lock_guard<std::mutex> lock(m_node_lock);
-    if (endpoint == "tone/generator") return;
-    
-    auto it = m_endpoint_to_id.find(endpoint);
-    if (it == m_endpoint_to_id.end()) return;
-    
-    NodeId id = it->second;
-    m_id_to_endpoint.erase(id);
-    m_endpoint_to_id.erase(it);
-    
+void ClientManager::unregister_node(const std::string&) {
+    // Node identity survives disconnection. Binding is refreshed independently;
+    // routes and saved endpoint strings must not be destroyed by going offline.
     if (m_dspEngine) m_dspEngine->mark_graph_dirty();
 }
 
 void ClientManager::update_activated_device(const std::string& id, bool active) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::lock_guard<std::mutex> lock(m_lock);
     auto it = std::find(m_activatedDevices.begin(), m_activatedDevices.end(), id);
     if (active && it == m_activatedDevices.end()) {
@@ -298,9 +327,12 @@ void ClientManager::update_activated_device(const std::string& id, bool active) 
         unregister_node("hardware/" + id + "/capture");
         unregister_node("hardware/" + id + "/playback");
     }
+    // Successful activation can follow a failed restore of an already-listed ID.
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
 }
 
 std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, const std::string& remoteIp) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::lock_guard<std::mutex> lock(m_lock);
     auto session = std::make_shared<WebClientSession>();
     session->id = id;
@@ -316,6 +348,8 @@ std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, con
 }
 
 void ClientManager::remove_session(uint32_t id) {
+    // IX can invoke Close while holding transport locks. Never wait for the
+    // control transaction mutex here; snapshots retain identity independently.
     std::shared_ptr<WebClientSession> removed;
     {
         std::lock_guard<std::mutex> lock(m_lock);
@@ -323,12 +357,14 @@ void ClientManager::remove_session(uint32_t id) {
             [id](const auto& session) { return session->id == id; });
         if (it == m_sessions.end()) return;
         removed = *it;
+        removed->active.store(false, std::memory_order_release);
+        m_retired_sessions.push_back(removed);
         std::string key = removed->get_client_key();
         unregister_node("client/" + key + "/capture");
         unregister_node("client/" + key + "/playback");
         m_sessions.erase(it);
     }
-    removed->stop_sender();
+    // The reaper joins outside the callback and outside IX transport locks.
 }
 
 std::vector<std::shared_ptr<WebClientSession>> ClientManager::get_active_sessions() {
@@ -342,26 +378,41 @@ std::vector<std::shared_ptr<WebClientSession>> ClientManager::get_active_session
 bool ClientManager::claim_identity(const std::shared_ptr<WebClientSession>& session,
                                    const std::string& key, const std::string& name) {
     if (key.empty()) return false;
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::lock_guard<std::mutex> lock(m_lock);
     for (const auto& other : m_sessions) {
         if (other.get() != session.get() && other->active.load(std::memory_order_relaxed) &&
             other->get_client_key() == key) return false;
     }
+    if (register_node("client/" + key + "/capture") == NODE_INVALID ||
+        register_node("client/" + key + "/playback") == NODE_INVALID) return false;
     const std::string displayName = name.empty() ? key : name;
     session->set_identity(key, displayName);
     m_known_client_names[key] = displayName;
     register_node("client/" + key + "/capture");
     register_node("client/" + key + "/playback");
+    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
     return true;
 }
 
 bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    std::lock_guard<std::mutex> controlsLock(controls.lock);
     const char* configuredPath = std::getenv("CM5AUDIO_SETTINGS");
     const std::string path = configuredPath && *configuredPath ? configuredPath : "./cm5audio_settings.json";
     std::ifstream file(path);
     if (!file) return false;
     try {
         const auto settings = nlohmann::json::parse(file);
+        if (m_dspEngine && settings.contains("global_dsp") && settings["global_dsp"].is_object()) {
+            const auto& dsp = settings["global_dsp"];
+            const float gain = dsp.value("gain", 1.0f), threshold = dsp.value("threshold", 0.7f), ratio = dsp.value("ratio", 4.0f);
+            if (std::isfinite(gain) && gain >= 0 && std::isfinite(threshold) && threshold >= 0 && std::isfinite(ratio) && ratio >= 1) {
+                m_dspEngine->get_gain_processor()->set_gain(gain);
+                m_dspEngine->get_compressor()->set_threshold(threshold);
+                m_dspEngine->get_compressor()->set_ratio(ratio);
+            }
+        }
         if (settings.contains("tone") && settings["tone"].is_object()) {
             const auto& value = settings["tone"];
             tone.enabled.store(value.value("enabled", false), std::memory_order_relaxed);
@@ -415,14 +466,15 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     if (!value.is_object() || !value.contains("id") || !parse_persisted_route_id(value["id"], route.id)) continue;
                     std::string src_ep = value.value("source", "");
                     std::string dst_ep = value.value("destination", "");
-                    route.source_node = get_node_id(src_ep);
-                    route.destination_node = get_node_id(dst_ep);
+                    route.source_node = src_ep.empty() ? NODE_INVALID : register_node(src_ep);
+                    route.destination_node = dst_ep.empty() ? NODE_INVALID : register_node(dst_ep);
                     route.source_channel = value.value("source_channel", CM5_MAX_CHANNELS);
                     route.destination_channel = value.value("destination_channel", CM5_MAX_CHANNELS);
                     route.gain = value.value("gain", 1.0f);
                     route.enabled = value.value("enabled", true);
                     if (!route.id || src_ep.empty() || dst_ep.empty() ||
                         route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS ||
+                        route.source_node == NODE_INVALID || route.destination_node == NODE_INVALID ||
                         !std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) continue;
                     routes.push_back(route);
                     const auto maxId = std::numeric_limits<uint32_t>::max();
@@ -456,9 +508,7 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                         // engine before restoring settings. Never index unsupported IDs.
                         std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
                         if (m_dspEngine && m_dspEngine->supports_route_dsp(route.id)) {
-                            m_dspEngine->update_route_chain(route.id, std::move(prepared.chain));
-                            m_dspEngine->set_route_gain(route.id, state.gain);
-                            m_dspEngine->set_route_dsp_active(route.id, state.active);
+                            m_dspEngine->update_route_dsp(route.id, std::move(prepared.chain), state.gain, state.active);
                         }
                         g_dspSettingsCache[route.id] = std::move(state);
                     }
@@ -473,16 +523,23 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                 }
             }
         }
+        if (m_dspEngine) m_dspEngine->mark_graph_dirty();
         return true;
     } catch (...) { return false; }
 }
 
 bool ClientManager::save_settings(const AudioControls& controls, const ToneControls& tone) const {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    std::lock_guard<std::mutex> controlsLock(controls.lock);
     const char* configuredPath = std::getenv("CM5AUDIO_SETTINGS");
     const std::string path = configuredPath && *configuredPath ? configuredPath : "./cm5audio_settings.json";
-    const std::string temporaryPath = path + ".tmp";
+    std::string temporaryPath;
     nlohmann::json settings;
     settings["version"] = 1;
+    if (m_dspEngine) settings["global_dsp"] = {
+        {"gain", m_dspEngine->get_gain_processor()->get_gain()},
+        {"threshold", m_dspEngine->get_compressor()->get_threshold()},
+        {"ratio", m_dspEngine->get_compressor()->get_ratio()}};
     settings["tone"] = {
         {"enabled", tone.enabled.load(std::memory_order_relaxed)},
         {"frequency_hz", tone.frequency_hz.load(std::memory_order_relaxed)},
@@ -550,14 +607,33 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
             if (!key.empty()) settings["clients"][key] = session->get_client_name();
         }
     }
+    // Unique files also protect against a separate process using this path.
+    int fd = -1;
     try {
-        std::ofstream file(temporaryPath, std::ios::trunc);
-        if (!file) return false;
-        file << settings.dump(2) << "\n";
-        file.close();
-        return std::rename(temporaryPath.c_str(), path.c_str()) == 0;
+        const std::string bytes = settings.dump(2) + "\n";
+        std::string pattern = path + ".tmp.XXXXXX";
+        std::vector<char> name(pattern.begin(), pattern.end());
+        name.push_back('\0');
+        fd = ::mkstemp(name.data());
+        if (fd < 0) return false;
+        temporaryPath = name.data();
+        size_t offset = 0;
+        while (offset < bytes.size()) {
+            const auto written = ::write(fd, bytes.data() + offset, bytes.size() - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) throw std::runtime_error("settings write failed");
+            offset += static_cast<size_t>(written);
+        }
+        if (::fsync(fd) != 0) throw std::runtime_error("settings flush failed");
+        const int closed = ::close(fd);
+        fd = -1;
+        if (closed != 0) throw std::runtime_error("settings close failed");
+        if (::rename(temporaryPath.c_str(), path.c_str()) != 0)
+            throw std::runtime_error("settings rename failed");
+        return true;
     } catch (...) {
-        std::remove(temporaryPath.c_str());
+        if (fd >= 0) ::close(fd);
+        if (!temporaryPath.empty()) ::unlink(temporaryPath.c_str());
         return false;
     }
 }
@@ -595,13 +671,15 @@ bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) co
 }
 
 bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::string& error) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     if (route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS) {
         error = "channel must be between 0 and 7"; return false;
     }
     if (!std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) {
         error = "gain must be finite and between 0 and 8"; return false;
     }
-    if (route.source_node == NODE_INVALID || route.destination_node == NODE_INVALID) {
+    if (route.source_node < 0 || route.destination_node < 0 ||
+        route.source_node >= 256 || route.destination_node >= 256) {
         error = "source or destination endpoint is invalid or unregistered"; return false;
     }
     std::lock_guard<std::mutex> routeLock(m_route_lock);
@@ -627,6 +705,7 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
 }
 
 bool ClientManager::remove_route(uint32_t routeId) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     {
         std::lock_guard<std::mutex> lock(m_route_lock);
         auto routes = *std::atomic_load(&m_routes);
@@ -644,6 +723,7 @@ bool ClientManager::remove_route(uint32_t routeId) {
 }
 
 bool ClientManager::update_route(uint32_t routeId, float gain, bool enabled) {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
     if (!std::isfinite(gain) || gain < 0.0f || gain > 8.0f) return false;
     std::lock_guard<std::mutex> lock(m_route_lock);
     auto routes = *std::atomic_load(&m_routes);
@@ -665,21 +745,62 @@ WebServer::WebServer(AudioMetrics& metrics, AudioControls& controls, ToneControl
 WebServer::~WebServer() { stop(); }
 
 bool WebServer::start() {
-    if (m_running.exchange(true)) return true;
+    std::lock_guard<std::mutex> lifecycle(m_lifecycleLock);
+    if (m_running.load()) return true;
     const std::string certPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_CERT"); return value && *value ? std::string(value) : "./certs/server.crt"; }();
     const std::string keyPath = [] { const char* value = std::getenv("CM5AUDIO_TLS_KEY"); return value && *value ? std::string(value) : "./certs/server.key"; }();
     const std::string p12Path = [] { const char* value = std::getenv("CM5AUDIO_TLS_P12"); return value && *value ? std::string(value) : "./certs/server.p12"; }();
     const bool tlsEnabled = !m_plainText && std::ifstream(certPath).good() && std::ifstream(keyPath).good();
 
-    m_httpThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
+    try {
         if (tlsEnabled) {
-            auto ssl = std::make_unique<httplib::SSLServer>(certPath.c_str(), keyPath.c_str());
-            if (!ssl->is_valid()) { std::cerr << "[HTTP] Invalid TLS certificate/key" << std::endl; m_running = false; return; }
+            auto ssl = std::make_unique<ReliableHttpServer<httplib::SSLServer>>(certPath.c_str(), keyPath.c_str());
+            if (!ssl->is_valid()) throw std::runtime_error("Invalid TLS certificate/key");
             m_httpServer = std::move(ssl);
         } else {
             std::cerr << (m_plainText ? "[HTTP] Plain HTTP enabled" : "[HTTP] TLS certificate not found; serving plain HTTP") << std::endl;
-            m_httpServer = std::make_unique<httplib::Server>();
+            m_httpServer = std::make_unique<ReliableHttpServer<httplib::Server>>();
         }
+        // Use address reuse for restart/TIME_WAIT, not SO_REUSEPORT (which can
+        // silently share an occupied application port with another instance).
+        m_httpServer->set_socket_options([](socket_t socket) {
+            const int reuse = 1;
+            ::setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        });
+        m_httpServer->set_read_timeout(1);
+        m_httpServer->set_write_timeout(1);
+        m_httpServer->set_keep_alive_timeout(1);
+        m_httpServer->set_payload_max_length(1024 * 1024);
+        // Serialize accepted mutations through adoption and (where requested) save.
+        // GETs use their own snapshot/container locks and remain concurrent.
+        const auto post = [this](const std::string& path, httplib::Server::Handler handler) {
+            m_httpServer->Post(path, [this, path, handler](const httplib::Request& request, httplib::Response& response) {
+                std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+                if (!m_running.load()) { dsp_error(response, 503, "server is stopping"); return; }
+                handler(request, response);
+                if (response.status >= 400 || path == "/api/settings/save") return;
+                const uint64_t target = m_dspEngine.request_adoption();
+                const bool adopted = m_dspEngine.wait_for_revision(target, std::chrono::milliseconds(1500));
+                auto body = nlohmann::json::parse(response.body);
+                body["accepted_revision"] = target;
+                body["adopted_revision"] = m_dspEngine.adopted_revision();
+                body["adopted"] = adopted;
+                body["persisted"] = false;
+                if (!adopted) {
+                    response.status = 503;
+                    body["status"] = "pending";
+                    body["message"] = "Configuration accepted, but engine adoption was not confirmed; refresh before retrying";
+                } else if (path == "/api/devices/activate" || path == "/api/devices/deactivate") {
+                    m_dspEngine.collect_retired_endpoints();
+                    const bool saved = m_clientMgr.save_settings(m_controls, m_tone);
+                    body["persisted"] = saved;
+                    if (saved) m_persistedRevision = target;
+                    else { response.status = 500; body["status"] = "error"; body["message"] = "Device state applied, but persistence failed"; }
+                }
+                body["persisted_revision"] = m_persistedRevision;
+                response.set_content(body.dump(), "application/json");
+            });
+        };
         m_httpServer->set_mount_point("/client", "./web_client");
         m_httpServer->Get("/server.crt", [certPath](const httplib::Request&, httplib::Response& response) {
             std::ifstream certificate(certPath, std::ios::in | std::ios::binary);
@@ -719,6 +840,7 @@ bool WebServer::start() {
         });
 
         auto meters = [this](const httplib::Request&, httplib::Response& response) {
+            std::lock_guard<std::mutex> metersLock(m_metrics.lock);
             nlohmann::json j;
             j["capture"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.capture) {
@@ -746,16 +868,20 @@ bool WebServer::start() {
             response.set_content(j.dump(2), "application/json");
         });
 
-        m_httpServer->Post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
             const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
             if (id.empty()) {
                 response.status = 400;
                 response.set_content("{\"status\":\"error\",\"message\":\"id parameter is required\"}", "application/json");
                 return;
             }
+            if (m_clientMgr.register_node("hardware/" + id + "/capture") == NODE_INVALID ||
+                m_clientMgr.register_node("hardware/" + id + "/playback") == NODE_INVALID) {
+                dsp_error(response, 400, "Endpoint node capacity exhausted");
+                return;
+            }
             if (m_deviceMgr.activate_device(id)) {
                 m_clientMgr.update_activated_device(id, true);
-                m_clientMgr.save_settings(m_controls, m_tone);
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } else {
                 response.status = 400;
@@ -763,7 +889,7 @@ bool WebServer::start() {
             }
         });
 
-        m_httpServer->Post("/api/devices/deactivate", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/devices/deactivate", [this](const httplib::Request& request, httplib::Response& response) {
             const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
             if (id.empty()) {
                 response.status = 400;
@@ -772,13 +898,13 @@ bool WebServer::start() {
             }
             m_deviceMgr.deactivate_device(id);
             m_clientMgr.update_activated_device(id, false);
-            m_clientMgr.save_settings(m_controls, m_tone);
             response.set_content("{\"status\":\"ok\"}", "application/json");
         });
 
         m_httpServer->Get("/api/meters", meters);
         m_httpServer->Get("/api/metrics", meters);
         m_httpServer->Get("/api/raw", [this](const httplib::Request&, httplib::Response& response) {
+            std::lock_guard<std::mutex> metersLock(m_metrics.lock);
             nlohmann::json j;
             j["capture"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.capture) {
@@ -808,19 +934,20 @@ bool WebServer::start() {
             j["amplitude"] = m_tone.amplitude.load();
             response.set_content(j.dump(2), "application/json");
         });
-        m_httpServer->Post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/tone", [this](const httplib::Request& request, httplib::Response& response) {
             try {
-                if (request.has_param("enabled")) m_tone.enabled.store(query_bool(request, "enabled", false));
+                const bool enabled = query_bool(request, "enabled", m_tone.enabled.load());
+                const float frequency = query_float(request, "frequency", m_tone.frequency_hz.load());
+                const float amplitude = query_float(request, "amplitude", m_tone.amplitude.load());
                 if (request.has_param("frequency")) {
-                    const float frequency = query_float(request, "frequency", -1.0f);
                     if (!std::isfinite(frequency) || frequency < 1.0f || frequency > 20000.0f) throw std::invalid_argument("frequency must be 1..20000 Hz");
-                    m_tone.frequency_hz.store(frequency);
                 }
                 if (request.has_param("amplitude")) {
-                    const float amplitude = query_float(request, "amplitude", -1.0f);
                     if (!std::isfinite(amplitude) || amplitude < 0.0f || amplitude > 1.0f) throw std::invalid_argument("amplitude must be 0..1");
-                    m_tone.amplitude.store(amplitude);
                 }
+                m_tone.enabled.store(enabled);
+                m_tone.frequency_hz.store(frequency);
+                m_tone.amplitude.store(amplitude);
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) {
                 response.status = 400;
@@ -842,25 +969,19 @@ bool WebServer::start() {
             j["ratio"] = compProc ? compProc->get_ratio() : 4.0f;
             response.set_content(j.dump(2), "application/json");
         });
-        m_httpServer->Post("/api/dsp", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/dsp", [this](const httplib::Request& request, httplib::Response& response) {
             try {
                 auto* gainProc = m_dspEngine.get_gain_processor();
                 auto* compProc = m_dspEngine.get_compressor();
-                if (request.has_param("gain")) {
-                    float g = query_float(request, "gain", -1.0f);
-                    if (g < 0.0f || !std::isfinite(g)) throw std::invalid_argument("gain must be >= 0");
-                    if (gainProc) gainProc->set_gain(g);
-                }
-                if (request.has_param("threshold")) {
-                    float t = query_float(request, "threshold", -1.0f);
-                    if (t < 0.0f || !std::isfinite(t)) throw std::invalid_argument("threshold must be >= 0");
-                    if (compProc) compProc->set_threshold(t);
-                }
-                if (request.has_param("ratio")) {
-                    float r = query_float(request, "ratio", -1.0f);
-                    if (r < 1.0f || !std::isfinite(r)) throw std::invalid_argument("ratio must be >= 1");
-                    if (compProc) compProc->set_ratio(r);
-                }
+                const float g = query_float(request, "gain", gainProc->get_gain());
+                const float t = query_float(request, "threshold", compProc->get_threshold());
+                const float r = query_float(request, "ratio", compProc->get_ratio());
+                if (g < 0.0f || !std::isfinite(g)) throw std::invalid_argument("gain must be >= 0");
+                if (t < 0.0f || !std::isfinite(t)) throw std::invalid_argument("threshold must be >= 0");
+                if (r < 1.0f || !std::isfinite(r)) throw std::invalid_argument("ratio must be >= 1");
+                gainProc->set_gain(g);
+                compProc->set_threshold(t);
+                compProc->set_ratio(r);
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& e) {
                 response.status = 400;
@@ -889,7 +1010,10 @@ bool WebServer::start() {
 
         m_httpServer->Get("/api/graph", [this](const httplib::Request&, httplib::Response& response) {
             nlohmann::json j;
-            j["revision"] = 1;
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            j["revision"] = m_dspEngine.requested_revision();
+            j["adopted_revision"] = m_dspEngine.adopted_revision();
+            j["persisted_revision"] = m_persistedRevision;
             
             std::unordered_map<std::string, nlohmann::json> endpointsMap;
 
@@ -970,7 +1094,7 @@ bool WebServer::start() {
             response.set_content(j.dump(2), "application/json");
         });
 
-        m_httpServer->Post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/routes", [this](const httplib::Request& request, httplib::Response& response) {
             AudioRoute route;
             // FIXED: Updated parameter names to match the frontend dashboard
             std::string src_ep = request.has_param("source_node") ? request.get_param_value("source_node") : "";
@@ -991,13 +1115,20 @@ bool WebServer::start() {
         });
 
         m_httpServer->Delete(R"(/api/routes/(\d+))", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            if (!m_running.load()) { dsp_error(response, 503, "server is stopping"); return; }
             uint32_t routeId = 0;
-            if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
+            if (!parse_route_dsp_id(request, routeId)) { dsp_error(response, 400, "invalid route id"); return; }
             if (!m_clientMgr.remove_route(routeId)) { response.status = 404; response.set_content("{\"status\":\"error\"}", "application/json"); return; }
-            response.set_content("{\"status\":\"ok\"}", "application/json");
+            const auto target = m_dspEngine.request_adoption();
+            const bool adopted = m_dspEngine.wait_for_revision(target, std::chrono::milliseconds(1500));
+            response.status = adopted ? 200 : 503;
+            response.set_content(nlohmann::json({{"status", adopted ? "ok" : "pending"},
+                {"accepted_revision", target}, {"adopted_revision", m_dspEngine.adopted_revision()},
+                {"adopted", adopted}, {"persisted", false}}).dump(), "application/json");
         });
 
-        m_httpServer->Post("/api/routes/update", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/routes/update", [this](const httplib::Request& request, httplib::Response& response) {
             const uint32_t id = query_uint(request, "id", 0);
             if (!id || !m_clientMgr.update_route(id, query_float(request, "gain", 1.0f), query_bool(request, "enabled", true))) {
                 response.status = 400; response.set_content("{\"status\":\"error\"}", "application/json"); return;
@@ -1016,7 +1147,7 @@ bool WebServer::start() {
             response.set_content(route_dsp_json(state).dump(2), "application/json");
         });
 
-        m_httpServer->Post(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
+        post(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
             uint32_t routeId = 0;
             if (!parse_route_dsp_id(request, routeId)) { dsp_error(response, 400, "invalid route id"); return; }
             if (!route_exists(m_clientMgr, routeId)) { dsp_error(response, 404, "route not found"); return; }
@@ -1033,9 +1164,7 @@ bool WebServer::start() {
                     // with settings persistence and route removal.
                     std::lock_guard<std::mutex> lock(g_dspCacheLock);
                     if (!route_exists(m_clientMgr, routeId)) { dsp_error(response, 404, "route not found"); return; }
-                    m_dspEngine.update_route_chain(routeId, std::move(prepared.chain));
-                    m_dspEngine.set_route_gain(routeId, prepared.state.gain);
-                    m_dspEngine.set_route_dsp_active(routeId, prepared.state.active);
+                    m_dspEngine.update_route_dsp(routeId, std::move(prepared.chain), prepared.state.gain, prepared.state.active);
                     g_dspSettingsCache[routeId] = std::move(prepared.state);
                 }
                 response.set_content(content, "application/json");
@@ -1044,36 +1173,60 @@ bool WebServer::start() {
             }
         });
 
-        m_httpServer->Post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
-            if (!m_clientMgr.save_settings(m_controls, m_tone)) {
-                response.status = 500;
-                response.set_content("{\"status\":\"error\",\"message\":\"settings could not be saved\"}", "application/json");
-                return;
-            }
-            response.set_content("{\"status\":\"ok\"}", "application/json");
-        });
-
-        m_httpServer->Post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
+        // Full inspector acceptance: validate every field before changing either
+        // route state or DSP. Legacy endpoints remain available to API clients.
+        post(R"(/api/routes/(\d+)/apply)", [this](const httplib::Request& request, httplib::Response& response) {
+            uint32_t routeId = 0;
+            if (!parse_route_dsp_id(request, routeId)) { dsp_error(response, 400, "invalid route id"); return; }
+            if (!route_exists(m_clientMgr, routeId)) { dsp_error(response, 404, "route not found"); return; }
+            if (!m_dspEngine.supports_route_dsp(routeId)) { dsp_error(response, 400, "Route ID exceeds DSP capacity"); return; }
             try {
-                const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
-                const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
-                const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
-                if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
-                auto& bank = (type == "playback") ? m_controls.playback[endpoint] : m_controls.capture[endpoint];
-                if (request.has_param("gain")) {
-                    const float gain = std::stof(request.get_param_value("gain"));
-                    if (!std::isfinite(gain) || gain < 0.0f || gain > 8.0f) throw std::invalid_argument("invalid gain");
-                    bank[channel].gain.store(gain);
+                const auto body = nlohmann::json::parse(request.body);
+                if (!body.is_object() || !body.contains("gain") || !body["gain"].is_number() ||
+                    !body.contains("enabled") || !body["enabled"].is_boolean() || !body.contains("dsp"))
+                    throw std::invalid_argument("gain, enabled and dsp are required");
+                const double gain = body["gain"].get<double>();
+                if (!std::isfinite(gain) || gain < 0 || gain > 8) throw std::invalid_argument("gain must be finite and 0..8");
+                auto prepared = prepare_route_dsp(body["dsp"]);
+                auto result = route_dsp_json(prepared.state);
+                result["status"] = "ok";
+                result["route_gain"] = gain;
+                result["enabled"] = body["enabled"];
+                // All request validation and processor construction precede publication.
+                // Ordinary route and DSP use separate publications: the final
+                // adoption barrier confirms both; this is not sample-atomic across
+                // those two groups or an allocation-failure rollback transaction.
+                if (!m_clientMgr.update_route(routeId, static_cast<float>(gain), body["enabled"].get<bool>()))
+                    throw std::invalid_argument("route update failed");
+                {
+                    std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+                    m_dspEngine.update_route_dsp(routeId, std::move(prepared.chain), prepared.state.gain, prepared.state.active);
+                    g_dspSettingsCache[routeId] = std::move(prepared.state);
                 }
-                if (request.has_param("mute")) bank[channel].mute.store(request.get_param_value("mute") == "1");
-                response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& error) {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(error.what()) + "\"}", "application/json");
-            }
+                response.set_content(result.dump(), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
         });
 
-        m_httpServer->Post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
+        post("/api/settings/save", [this](const httplib::Request&, httplib::Response& response) {
+            const auto target = m_dspEngine.request_adoption();
+            const bool adopted = m_dspEngine.wait_for_revision(target, std::chrono::milliseconds(1500));
+            const bool persisted = adopted && m_clientMgr.save_settings(m_controls, m_tone);
+            if (persisted) m_persistedRevision = target;
+            response.status = !adopted ? 503 : persisted ? 200 : 500;
+            response.set_content(nlohmann::json({{"status", persisted ? "ok" : adopted ? "error" : "pending"},
+                {"accepted_revision", target}, {"adopted_revision", m_dspEngine.adopted_revision()},
+                {"persisted_revision", m_persistedRevision}, {"adopted", adopted}, {"persisted", persisted},
+                {"message", persisted ? "Applied configuration saved" : adopted ? "Applied, but settings could not be saved" : "Engine adoption not confirmed; settings were not saved"}}).dump(), "application/json");
+        });
+
+        post("/api/control", [this](const httplib::Request& request, httplib::Response& response) {
+            // These banks are legacy storage, not connected sample controls. Do
+            // not acknowledge a hardware gain/mute change that cannot be heard.
+            dsp_error(response, 501, "Hardware channel gain/mute is not implemented in the sample path; use route gain or a Gain processor");
+        });
+
+        post("/api/reset_clips", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::mutex> metersLock(m_metrics.lock);
             try {
                 if (request.has_param("all")) {
                     for (auto& [id, bank] : m_metrics.capture) {
@@ -1102,12 +1255,12 @@ bool WebServer::start() {
         m_httpServer->Get("/favicon.ico", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_favicon(), "image/x-icon"); });
 
         m_httpServer->Get("/", [](const httplib::Request&, httplib::Response& response) { response.set_content(read_dashboard(), "text/html"); });
-        std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://0.0.0.0:" << m_httpPort << std::endl;
-        m_httpServer->listen("0.0.0.0", m_httpPort);
-    });
-
-    m_wsThread = std::thread([this, certPath, keyPath, p12Path, tlsEnabled] {
-        m_wsServer = std::make_unique<ix::WebSocketServer>(m_wsPort, "0.0.0.0");
+        const char* bind = std::getenv("CM5AUDIO_BIND_ADDRESS");
+        const std::string host = bind && *bind ? bind : "0.0.0.0";
+        if (m_httpPort == 0) m_httpPort = m_httpServer->bind_to_any_port(host);
+        else if (!m_httpServer->bind_to_port(host, m_httpPort)) throw std::runtime_error("HTTP bind failed");
+        if (m_httpPort < 0) throw std::runtime_error("HTTP bind failed");
+        m_wsServer = std::make_unique<ReliableWebSocketServer>(m_wsPort, host);
         if (m_plainText) std::cerr << "[WS] Plain WS enabled" << std::endl;
         if (tlsEnabled) {
             ix::SocketTLSOptions tls;
@@ -1119,61 +1272,125 @@ bool WebServer::start() {
             auto socket = weakSocket.lock();
             if (!socket) return;
             const uint32_t id = nextId.fetch_add(1);
-            const auto session = m_clientMgr.create_session(id, state ? state->getRemoteIp() : "");
-            session->start_sender(socket);
-            
-            nlohmann::json assigned;
-            assigned["type"] = "assigned";
-            assigned["connection_id"] = id;
-            assigned["client_id"] = session->get_client_key();
-            assigned["name"] = session->get_client_name();
-            socket->sendText(assigned.dump());
-
-            socket->setOnMessageCallback([this, session, id, socket](const ix::WebSocketMessagePtr& message) {
-                if (message->type == ix::WebSocketMessageType::Message && message->binary && !message->str.empty()) {
-                    session->incoming_rb.write(message->str.data(), message->str.size());
-                } else if (message->type == ix::WebSocketMessageType::Message && !message->binary) {
-                    std::string key, name;
-                    unsigned input = session->input_channels.load(std::memory_order_relaxed);
-                    unsigned output = session->output_channels.load(std::memory_order_relaxed);
-                    if (parse_identity_message(message->str, key, name, input, output)) {
-                        if (!m_clientMgr.claim_identity(session, key, name)) {
-                            nlohmann::json conflict;
-                            conflict["type"] = "identity_conflict";
-                            conflict["client_id"] = key;
-                            socket->sendText(conflict.dump());
-                        } else {
-                            unsigned finalIn = std::clamp(input, 1u, CM5_MAX_CHANNELS);
-                            unsigned finalOut = std::clamp(output, 1u, CM5_MAX_CHANNELS);
-                            session->input_channels.store(finalIn, std::memory_order_relaxed);
-                            session->output_channels.store(finalOut, std::memory_order_relaxed);
-                            session->incoming_rb.init(ma_format_f32, finalIn, 48000);
-                            session->outgoing_rb.init(ma_format_f32, finalOut, 48000);
-                            nlohmann::json accepted;
-                            accepted["type"] = "identity_accepted";
-                            accepted["client_id"] = session->get_client_key();
-                            accepted["name"] = session->get_client_name();
-                            socket->sendText(accepted.dump());
-                        }
+            const std::string remote = state ? state->getRemoteIp() : "";
+            // Connection callback precedes the handshake in IX. Create no session
+            // or sender until Open; failed handshakes then own no application work.
+            auto holder = std::make_shared<std::shared_ptr<WebClientSession>>();
+            socket->setOnMessageCallback([this, holder, id, remote, weakSocket](const ix::WebSocketMessagePtr& message) {
+                auto socket = weakSocket.lock();
+                if (!socket) return;
+                if (message->type == ix::WebSocketMessageType::Close) {
+                    m_clientMgr.remove_session(id); // Marks retirement; never joins here.
+                    return;
+                }
+                if (!m_running.load()) { socket->close(); return; }
+                if (message->type == ix::WebSocketMessageType::Open) {
+                    {
+                        std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+                        if (!m_running.load()) return;
+                        *holder = m_clientMgr.create_session(id, remote);
+                        (*holder)->socket = socket;
                     }
-                } else if (message->type == ix::WebSocketMessageType::Close) {
-                    m_clientMgr.remove_session(id);
+                    socket->sendText(nlohmann::json({{"type", "assigned"}, {"connection_id", id},
+                        {"client_id", (*holder)->get_client_key()}, {"name", (*holder)->get_client_name()}}).dump());
+                    return;
+                }
+                const auto session = *holder;
+                if (!session || !session->active.load()) return;
+                if (message->type == ix::WebSocketMessageType::Message && message->binary) {
+                    if (session->media_ready.load(std::memory_order_acquire))
+                        session->incoming_rb.write(message->str.data(), message->str.size());
+                } else if (message->type == ix::WebSocketMessageType::Message) {
+                    std::string key, name;
+                    unsigned input = session->input_channels.load(), output = session->output_channels.load();
+                    if (!parse_identity_message(message->str, key, name, input, output)) return;
+                    const unsigned finalIn = std::clamp(input, 1u, CM5_MAX_CHANNELS);
+                    const unsigned finalOut = std::clamp(output, 1u, CM5_MAX_CHANNELS);
+                    std::unique_lock<std::recursive_mutex> control(m_clientMgr.control_mutex());
+                    if (session->media_ready.load()) {
+                        // Live resizing/renaming races ring-buffer users. Reconnect
+                        // for different identity/channel counts; identical hello is idempotent.
+                        const bool same = key == session->get_client_key() && finalIn == session->input_channels.load() && finalOut == session->output_channels.load();
+                        control.unlock();
+                        socket->sendText(nlohmann::json({{"type", same ? "identity_accepted" : "identity_conflict"},
+                            {"client_id", key}, {"message", same ? "Already configured" : "Reconnect to change identity or channels"}}).dump());
+                        return;
+                    }
+                    session->input_channels.store(finalIn);
+                    session->output_channels.store(finalOut);
+                    if (!session->incoming_rb.init(ma_format_f32, finalIn, 48000) ||
+                        !session->outgoing_rb.init(ma_format_f32, finalOut, 48000)) { control.unlock(); socket->close(); return; }
+                    // Allocate/start before claiming identity publishes an endpoint.
+                    session->start_sender(socket);
+                    if (!m_clientMgr.claim_identity(session, key, name)) {
+                        session->active.store(false);
+                        m_clientMgr.remove_session(id);
+                        control.unlock();
+                        socket->sendText(nlohmann::json({{"type", "identity_conflict"}, {"client_id", key}}).dump());
+                        socket->close();
+                    } else {
+                        session->media_ready.store(true, std::memory_order_release);
+                        m_dspEngine.mark_graph_dirty();
+                        control.unlock();
+                        socket->sendText(nlohmann::json({{"type", "identity_accepted"},
+                            {"client_id", key}, {"name", session->get_client_name()}}).dump());
+                    }
                 }
             });
         });
         const auto result = m_wsServer->listen();
-        if (!result.first) { std::cerr << "[WS] Failed to listen on port " << m_wsPort << ": " << result.second << std::endl; return; }
+        if (!result.first) throw std::runtime_error("WebSocket bind failed: " + result.second);
+        m_wsPort = m_wsServer->getPort();
+        m_running.store(true);
+        m_httpThread = std::thread([this] {
+            if (!m_httpServer->listen_after_bind()) m_running.store(false);
+        });
+        m_httpServer->wait_until_ready();
         m_wsServer->start();
-        while (m_running.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        m_wsServer->stop();
-    });
-    return true;
+        m_sessionReaper = std::thread([this] {
+            while (m_running.load()) {
+                m_clientMgr.collect_retired_sessions();
+                m_dspEngine.collect_retired_endpoints();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+        std::cout << "[HTTP] Dashboard listening on " << (tlsEnabled ? "https" : "http") << "://" << host << ":" << m_httpPort << std::endl;
+        return true;
+    } catch (const std::exception& error) {
+        std::cerr << "[Server] Startup failed: " << error.what() << std::endl;
+        m_running.store(false);
+        if (m_httpServer) {
+            m_httpServer->stop();
+            if (auto* plain = dynamic_cast<ReliableHttpServer<httplib::Server>*>(m_httpServer.get())) plain->cancel_connections();
+            if (auto* tls = dynamic_cast<ReliableHttpServer<httplib::SSLServer>*>(m_httpServer.get())) tls->cancel_connections();
+        }
+        if (m_wsServer) m_wsServer->shutdown();
+        if (m_httpThread.joinable()) m_httpThread.join();
+        if (m_sessionReaper.joinable()) m_sessionReaper.join();
+        m_clientMgr.stop_sessions();
+        m_httpServer.reset();
+        m_wsServer.reset();
+        return false;
+    }
 }
 
 void WebServer::stop() {
-    if (!m_running.exchange(false)) return;
-    if (m_httpServer) m_httpServer->stop();
-    if (m_wsServer) m_wsServer->stop();
+    std::lock_guard<std::mutex> lifecycle(m_lifecycleLock);
+    if (!m_httpServer && !m_wsServer && !m_httpThread.joinable() && !m_sessionReaper.joinable()) return;
+    m_running.store(false);
+    // Join HTTP workers before ending DSP: accepted mutations either finish their
+    // adoption barrier or fail, rather than being interrupted midway through save.
+    if (m_httpServer) {
+        m_httpServer->stop();
+        if (auto* plain = dynamic_cast<ReliableHttpServer<httplib::Server>*>(m_httpServer.get())) plain->cancel_connections();
+        if (auto* tls = dynamic_cast<ReliableHttpServer<httplib::SSLServer>*>(m_httpServer.get())) tls->cancel_connections();
+    }
     if (m_httpThread.joinable()) m_httpThread.join();
-    if (m_wsThread.joinable()) m_wsThread.join();
+    m_dspEngine.stop(); // Endpoint owners remain valid through the last audio block.
+    if (m_wsServer) m_wsServer->shutdown(); // Exactly one IX shutdown caller.
+    if (m_sessionReaper.joinable()) m_sessionReaper.join();
+    m_clientMgr.stop_sessions();
+    m_dspEngine.collect_retired_endpoints();
+    m_wsServer.reset();
+    m_httpServer.reset();
 }

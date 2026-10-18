@@ -94,7 +94,7 @@ int main() {
     expect_invalid([&] { registry.create("test_types", {{"mode", "c"}}, normalized); });
     expect_invalid([&] { registry.create("test_types", {{"enabled", 0}}, normalized); });
 
-    DeviceManager devices; // Context only; no device enumeration or activation.
+    DeviceManager devices(false); // No backend initialization or physical devices.
     ClientManager clients;
     AudioMetrics metrics;
     AudioControls controls;
@@ -115,14 +115,13 @@ int main() {
     // destroy a processor currently executing on the DSP thread.
     std::vector<std::unique_ptr<AudioProcessor>> blocking;
     blocking.push_back(std::make_unique<BlockingProcessor>());
-    engine->update_route_chain(id, std::move(blocking));
-    engine->set_route_dsp_active(id, true);
+    engine->update_route_dsp(id, std::move(blocking), 1.0f, true);
     engine->start();
     wait_for([] { return entered.load(); });
     for (unsigned i = 0; i < 1000; ++i) {
         std::vector<std::unique_ptr<AudioProcessor>> chain;
         chain.push_back(std::make_unique<CountingProcessor>());
-        engine->update_route_chain(id, std::move(chain));
+        engine->update_route_dsp(id, std::move(chain), 1.0f, true);
         assert(!destroyed.load());
     }
     release_reader.store(true);
@@ -130,7 +129,7 @@ int main() {
     engine->stop();
     // Control-side reclamation is lazy: cycle through the spare slots after the
     // reader unpins, rather than requiring destruction at the first new update.
-    for (unsigned i = 0; i < 3; ++i) engine->update_route_chain(id, {});
+    for (unsigned i = 0; i < 3; ++i) engine->update_route_dsp(id, {}, 1.0f, true);
     assert(destroyed.load());
 
     char directoryTemplate[] = "/tmp/cm5audio-plugins-test-XXXXXX";
@@ -138,8 +137,10 @@ int main() {
     assert(directory);
     const auto settingsPath = std::filesystem::path(directory) / "settings.json";
     setenv("CM5AUDIO_SETTINGS", settingsPath.c_str(), 1);
+    setenv("CM5AUDIO_BIND_ADDRESS", "127.0.0.1", 1);
+    engine->start();
     WebServer server(metrics, controls, tone, clients, devices, *engine, 28182, 28183, true);
-    server.start();
+    assert(server.start());
     httplib::Client http("127.0.0.1", 28182);
     http.set_connection_timeout(1);
     http.set_read_timeout(5);
@@ -185,13 +186,16 @@ int main() {
     { std::ofstream file(settingsPath); file << saved; }
     assert(clients.load_settings(controls, tone));
     WebServer restoredServer(metrics, controls, tone, clients, devices, *engine, 28182, 28183, true);
-    restoredServer.start();
+    engine->start();
+    assert(restoredServer.start());
     wait_for([&] { const auto r = http.Get(url); return r && r->status == 200; });
     const auto restored = response_json(http.Get(url), 200);
     assert(restored["active"] == false && restored.contains("warning"));
     assert(restored["chain"][0]["type"] == "missing_plugin");
     restoredServer.stop();
     std::filesystem::remove_all(directory);
+    clients.set_dsp_engine(nullptr);
     unsetenv("CM5AUDIO_SETTINGS");
+    unsetenv("CM5AUDIO_BIND_ADDRESS");
     std::cout << "PASS: registry, typed validation, DSP processing, reader lifetime, discovery, API rejection, persistence and unavailable-plugin recovery\n";
 }
