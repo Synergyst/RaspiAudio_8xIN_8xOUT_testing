@@ -6,7 +6,9 @@ LDFLAGS = -L/usr/local/lib -lasound -lixwebsocket -lssl -lcrypto -lz -lpthread
 # Separate fast-changing app sources from rarely-changed miniaudio
 APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine.cpp \
 	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
-	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp
+	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp \
+	src/plugins/echo_processor.cpp src/plugins/chorus_processor.cpp src/plugins/reverb_processor.cpp \
+	src/plugins/lush_reverb_processor.cpp src/plugins/eq_processor.cpp
 APP_OBJS = $(APP_SRCS:src/%.cpp=build/%.o)
 
 MINIAUDIO_SRC = src/miniaudio_impl.cpp
