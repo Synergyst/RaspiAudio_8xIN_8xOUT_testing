@@ -4,7 +4,9 @@ CXXFLAGS = -std=c++17 -O3 -Iinclude -I/usr/local/include -I$(NLOHMANN_JSON_INCLU
 LDFLAGS = -L/usr/local/lib -lasound -lixwebsocket -lssl -lcrypto -lz -lpthread
 
 # Separate fast-changing app sources from rarely-changed miniaudio
-APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine.cpp
+APP_SRCS = src/main.cpp src/web_server.cpp src/device_manager.cpp src/dsp_engine.cpp \
+	src/processor_registry.cpp src/plugins/register_builtin_processors.cpp \
+	src/plugins/passthrough.cpp src/plugins/gain.cpp src/plugins/compressor.cpp
 APP_OBJS = $(APP_SRCS:src/%.cpp=build/%.o)
 
 MINIAUDIO_SRC = src/miniaudio_impl.cpp
@@ -38,6 +40,7 @@ $(MINIAUDIO_OBJ): include/miniaudio.h
 
 # Track headers so editing/registering a C++ processor rebuilds every affected object.
 build/%.o: src/%.cpp | build
+	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 $(IX_TLS_OBJ): third_party/ixwebsocket/IXSocketOpenSSL.cpp | build
@@ -98,6 +101,6 @@ clean-miniaudio:
 clean-alsatools:
 	rm -f $(CAPS_OBJ) $(CAPS_OBJ:.o=.d) $(TEST_OBJ) $(TEST_OBJ:.o=.d) $(CAPS_TARGET) $(TEST_TARGET)
 
--include $(wildcard build/*.d)
+-include $(APP_OBJS:.o=.d) $(wildcard build/*.d)
 
 .PHONY: all clean clean-miniaudio clean-alsatools alsatools test-plugins test-reliability

@@ -1,4 +1,5 @@
 #include "dsp_engine.h"
+#include "plugins/passthrough.h"
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 #include <cassert>

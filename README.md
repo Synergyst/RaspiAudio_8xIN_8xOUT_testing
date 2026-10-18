@@ -383,8 +383,8 @@ A separate fixed global Gain + Compressor stage runs on **hardware playback** af
 
 ### Add an effect without editing the dashboard
 
-1. Implement an `AudioProcessor` class in C++.
-2. Register its stable type, display name, description, parameter descriptors, and factory in `ProcessorRegistry` in `include/dsp_engine.h`, or during startup before settings/worker threads.
+1. Implement an `AudioProcessor` class using the interface in `include/audio_processor.h`.
+2. Keep its descriptor and factory with its implementation under `src/plugins/`, add a registration function, and include/call it from `src/plugins/register_builtin_processors.cpp` and the Makefile. Application-owned processors can instead register during startup before settings/worker threads.
 3. Rebuild and restart the native program.
 4. Reload the dashboard or refresh processor discovery. The menu and controls follow the backend metadata.
 
@@ -404,7 +404,7 @@ See **[docs/PLUGINS.md](docs/PLUGINS.md)** for descriptor fields, a C++ registra
 | `HardwareDevice` | Separate capture/playback stream, hardware callback, PCM ring buffers |
 | `ClientManager` | WebClient sessions, endpoint-to-node mapping, immutable route snapshots, persistence |
 | `DspEngine` | Graph rebuild/order, capture, tone, per-route processing/summing, playback, metering |
-| `ProcessorRegistry` | Processor descriptors, discovery, default filling, validation, construction |
+| `ProcessorRegistry` | Processor descriptors, discovery, default filling, validation, construction (`include/processor_registry.h`, `src/processor_registry.cpp`) |
 | `WebServer` | HTTP control/static files, WebSocket sessions, canonical route DSP cache |
 
 Normal startup enumerates hardware, constructs/links the engine, restores settings and processor chains, then starts DSP and web service threads. `--no-audio` skips backend initialization/enumeration and cannot activate restored hardware, while retaining logical settings/routes. DSP must exist before settings restoration to apply saved route chains and global DSP.
@@ -752,10 +752,13 @@ The supplied files and helpers are development conveniences, not a production se
 ```text
 cm5audio/
 ├── include/
-│   ├── constants.h              Block size, channel width, staging/processor limits
-│   ├── device_manager.h        Hardware/context ownership declarations
-│   ├── dsp_engine.h            AudioProcessor classes, registry/schema, engine state
-│   ├── web_server.h            Routes, sessions, meters/controls, server declarations
+│   ├── constants.h                  Block size, channel width, staging/processor limits
+│   ├── device_manager.h             Hardware/context ownership declarations
+│   ├── audio_processor.h            Native processor interface
+│   ├── processor_registry.h         Processor descriptors and registry API
+│   ├── plugins/                     Built-in processor interfaces
+│   ├── dsp_engine.h                 Routing engine state and processor publication
+│   ├── web_server.h                 Routes, sessions, meters/controls, server declarations
 │   ├── reliable_websocket_server.h  Single-owner IX accepted-worker shutdown wrapper
 │   ├── reliable_http_server.h  Accepted HTTP socket cancellation during shutdown
 │   ├── ring_buffer.h           miniaudio PCM ring-buffer wrapper
@@ -765,6 +768,8 @@ cm5audio/
 │   ├── main.cpp                Startup/link/restore order, signals, server ports
 │   ├── device_manager.cpp      Backend priority, enumeration, activation, callbacks
 │   ├── dsp_engine.cpp          Graph rebuilding, processing, DSP publication, meters
+│   ├── processor_registry.cpp  Discovery, validation and construction
+│   ├── plugins/                Built-in processor implementations and registration
 │   ├── web_server.cpp          API handlers, settings, registry bridge, WebSockets
 │   ├── miniaudio_impl.cpp      Single native miniaudio implementation + debug output
 │   ├── alsa_caps.cpp           Optional native ALSA capability probe

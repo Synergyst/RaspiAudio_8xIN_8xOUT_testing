@@ -1,8 +1,10 @@
 # Built-in C++ processor discovery
 
-The backend registry in `include/dsp_engine.h` is the source of truth for route
-processor names, parameters, defaults, ranges and construction. The dashboard
-contains no effect-specific menu entries or parameter defaults.
+The backend registry declared in `include/processor_registry.h` and implemented in
+`src/processor_registry.cpp` is the source of truth for route processor names,
+parameters, defaults, ranges and construction. Each built-in processor keeps its
+implementation and descriptor/factory in `src/plugins/`; the dashboard contains
+no effect-specific menu entries or parameter defaults.
 
 This is a **compiled-in processor registry**, not a VST/LV2 loader and not runtime
 shared-library hot loading. Rebuild and restart the program after changing C++.
@@ -28,13 +30,17 @@ threshold **0.1**. Settings files are never automatically rewritten by discovery
 
 ## Add a processor entirely in C++
 
-1. Implement an `AudioProcessor` with `process(float*, size_t frames, unsigned
-   channels)`. Route processors currently receive a single channel at 48 kHz.
-   Never allocate, lock, do I/O, or throw from `process()`.
-2. Add a `register_processor` entry in the `ProcessorRegistry` constructor beside
-   the built-ins. Supply the stable unique `type`, display name, description,
-   parameter descriptors and factory. The factory receives validated, complete
-   parameters: omitted values are filled from the descriptors, not the UI.
+1. Implement an `AudioProcessor` declared through `include/audio_processor.h`
+   with `process(float*, size_t frames, unsigned channels)`. Route processors
+   currently receive a single channel at 48 kHz. Never allocate, lock, do I/O, or
+   throw from `process()`.
+2. Keep the processor implementation, descriptor, and factory together in a
+   plugin source under `src/plugins/`. Add a small registration function there,
+   declare/call it in `src/plugins/register_builtin_processors.cpp`, and include
+   the source in `APP_SRCS` in the Makefile. Registration is explicit and
+   startup-only; no registry implementation, routing, HTTP handler, settings, or
+   frontend effect-specific code needs to change. The factory receives validated,
+   complete parameters: omitted values are filled from descriptors, not the UI.
 3. Rebuild with `make` and restart cm5audio. Reload the dashboard or click
    REFRESH. No HTML/JavaScript/API factory edits are needed.
 
@@ -52,14 +58,14 @@ register_processor({
 });
 ```
 
-Alternatively call `ProcessorRegistry::instance().register_processor(...)` from
-C++ startup code **before** loading settings or starting any worker/server
-threads. Registration is startup-only; concurrent registration is not supported.
-Descriptors and factories are both required: C++ cannot infer meaningful UI
-ranges/units from an arbitrary DSP implementation. Registration is the one place
-to describe them. Duplicate type/parameter IDs and invalid defaults are rejected.
-A new separate `.cpp` implementation must also be included in the Makefile's
-`APP_SRCS` (or otherwise compiled/linked).
+Application-owned processors may alternatively call
+`ProcessorRegistry::instance().register_processor(...)` from startup code
+**before** loading settings or starting worker/server threads. Registration is
+startup-only; concurrent registration is not supported. Descriptors and factories
+are both required: C++ cannot infer meaningful UI ranges/units from an arbitrary
+DSP implementation. Duplicate type/parameter IDs and invalid defaults are
+rejected. Each added source must be included in the Makefile's `APP_SRCS` (or
+otherwise compiled/linked).
 
 ### Parameter descriptor fields
 
