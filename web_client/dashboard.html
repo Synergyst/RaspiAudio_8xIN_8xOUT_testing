@@ -442,7 +442,7 @@
                 <span id="zoom-indicator" style="font-size: 11px; min-width: 40px; text-align: center; color: var(--accent-blue); font-weight: bold;">100%</span>
                 <button onclick="zoomOut()" style="padding: 4px 10px; min-height: 28px;">-</button>
                 <button onclick="resetZoom()" style="padding: 4px 10px; min-height: 28px;">RESET</button>
-                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>
+                <button onclick="resetNodePositions()" style="padding: 4px 10px; min-height: 28px; background: #4c566a; margin-left: 10px;">RESET POSITIONS</button>            <button onclick="PluginDemo.spawnNode()" style="background: var(--accent-blue); color: #000; font-weight: bold; margin-left: 10px;">ADD DUMMY PLUGIN</button>
             </div>
             <div id="patchbay">
                 <div id="patchbay-viewport">
@@ -1735,5 +1735,6 @@
         }
         init();
     </script>
+    <script src="client/plugin_demo.js"></script>
 </body>
 </html>
