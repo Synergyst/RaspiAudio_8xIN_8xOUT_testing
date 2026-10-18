@@ -20,7 +20,7 @@ static std::atomic<uint32_t> g_processCount{0};
 #define SAMPLED_TRACE(msg, val)
 #endif
 
-DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone) 
+DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone)
     : m_deviceManager(deviceManager), m_clientManager(clientManager), m_metrics(metrics), m_tone(tone) {
     m_nodeBufferPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
     m_feedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
@@ -52,14 +52,22 @@ void DspEngine::set_route_gain(uint32_t routeId, float gain) {
 }
 
 void DspEngine::update_route_chain(uint32_t routeId, std::vector<std::unique_ptr<AudioProcessor>> newChain) {
-    if (routeId >= MAX_ROUTES) return;
+    if (!supports_route_dsp(routeId)) throw std::invalid_argument("Route ID exceeds DSP capacity");
+    if (newChain.size() > CM5_MAX_PROCESSORS_PER_ROUTE) throw std::invalid_argument("DSP chain exceeds capacity");
     RouteDsp& rdsp = m_routeDsp[routeId];
-    int write_idx = 1 - rdsp.current_idx.load(std::memory_order_relaxed);
-    for (unsigned i = 0; i < CM5_MAX_PROCESSORS_PER_ROUTE; ++i) rdsp.chain[write_idx][i] = nullptr;
-    int len = std::min((int)newChain.size(), (int)CM5_MAX_PROCESSORS_PER_ROUTE);
-    for (int i = 0; i < len; ++i) rdsp.chain[write_idx][i] = std::move(newChain[i]);
-    rdsp.length.store(len, std::memory_order_release);
-    rdsp.current_idx.store(write_idx, std::memory_order_release);
+    std::lock_guard<std::mutex> writer(rdsp.writer_lock);
+    // Sequentially consistent publication plus reader pinning prevents a fast second
+    // update from destroying a chain still used by the audio thread. Three slots
+    // provide a spare without waiting for the audio reader or allocating there.
+    const int current = rdsp.current_idx.load();
+    const int reader = rdsp.reader_idx.load();
+    int write_idx = 0;
+    while (write_idx == current || write_idx == reader) ++write_idx;
+    auto& target = rdsp.chains[write_idx];
+    for (auto& processor : target.processors) processor.reset();
+    target.length = static_cast<int>(newChain.size());
+    for (int i = 0; i < target.length; ++i) target.processors[i] = std::move(newChain[i]);
+    rdsp.current_idx.store(write_idx);
 }
 
 void DspEngine::update_meters(float* buffer, unsigned channels, const std::string& endpointId, bool isCapture) {
@@ -301,12 +309,20 @@ void DspEngine::process_audio() {
                     float* srcData = isFeedback ? get_feedback_buffer(node) : buf;
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) m_routeScratchBuffer[f] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
                     float currentGain = route->gain;
-                    if (route->id >= 0 && (size_t)route->id < MAX_ROUTES) {
+                    if ((size_t)route->id < MAX_ROUTES) {
                         RouteDsp& rdsp = m_routeDsp[route->id];
                         if (rdsp.active.load(std::memory_order_acquire)) {
-                            int idx = rdsp.current_idx.load(std::memory_order_acquire), len = rdsp.length.load(std::memory_order_acquire);
-                            for (int i = 0; i < len; ++i) if (rdsp.chain[idx][i]) rdsp.chain[idx][i]->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
-                            currentGain = rdsp.gain.load(std::memory_order_acquire);
+                            int idx;
+                            do {
+                                idx = rdsp.current_idx.load();
+                                rdsp.reader_idx.store(idx);
+                            } while (idx != rdsp.current_idx.load());
+                            const auto& chain = rdsp.chains[idx];
+                            for (int i = 0; i < chain.length; ++i)
+                                if (chain.processors[i]) chain.processors[i]->process(m_routeScratchBuffer.data(), CM5_BUFFER_FRAMES, 1);
+                            rdsp.reader_idx.store(-1);
+                            // Route gain remains meaningful when DSP is active.
+                            currentGain *= rdsp.gain.load(std::memory_order_acquire);
                         }
                     }
                     for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += m_routeScratchBuffer[f] * currentGain;

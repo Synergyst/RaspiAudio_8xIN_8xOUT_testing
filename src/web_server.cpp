@@ -15,8 +15,10 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -30,7 +32,9 @@ namespace {
 struct RouteDspState {
     bool active = false;
     float gain = 1.0f;
-    std::vector<nlohmann::json> chain; // Stores { "type": "gain", "params": {...} }
+    // Keep invalid persisted chains verbatim so saving does not silently discard them.
+    nlohmann::json chain = nlohmann::json::array();
+    std::string warning;
 };
 std::unordered_map<uint32_t, RouteDspState> g_dspSettingsCache;
 std::mutex g_dspCacheLock;
@@ -112,17 +116,85 @@ nlohmann::json build_meter_json(const std::array<ChannelMeter, CM5_MAX_CHANNELS>
     return arr;
 }
 
-std::unique_ptr<AudioProcessor> create_processor(const std::string& type, const nlohmann::json& params) {
-    if (type == "gain") {
-        return std::make_unique<GainProcessor>(params.value("gain", 1.0f));
-    } else if (type == "compressor") {
-        return std::make_unique<CompressorProcessor>(
-            params.value("threshold", 0.5f), 
-            params.value("ratio", 4.0f)
-        );
-    } else {
-        return std::make_unique<PassthroughProcessor>();
+struct PreparedRouteDsp {
+    RouteDspState state;
+    std::vector<std::unique_ptr<AudioProcessor>> chain;
+};
+
+// All parsing, validation, normalization and processor allocation happen on the
+// control thread, before either the live route or its cached state is changed.
+PreparedRouteDsp prepare_route_dsp(const nlohmann::json& body) {
+    if (!body.is_object()) throw std::invalid_argument("DSP settings must be an object");
+    PreparedRouteDsp prepared;
+    if (body.contains("active")) {
+        if (!body["active"].is_boolean()) throw std::invalid_argument("active must be a boolean");
+        prepared.state.active = body["active"].get<bool>();
     }
+    if (body.contains("gain")) {
+        if (!body["gain"].is_number()) throw std::invalid_argument("gain must be a number");
+        const double gain = body["gain"].get<double>();
+        if (!std::isfinite(gain) || gain < 0.0 || gain > 8.0)
+            throw std::invalid_argument("gain must be finite and between 0 and 8");
+        prepared.state.gain = static_cast<float>(gain);
+    }
+    if (!body.contains("chain")) return prepared;
+    const auto& chain = body["chain"];
+    if (!chain.is_array()) throw std::invalid_argument("chain must be an array");
+    if (chain.size() > CM5_MAX_PROCESSORS_PER_ROUTE)
+        throw std::invalid_argument("DSP chain exceeds maximum length of " + std::to_string(CM5_MAX_PROCESSORS_PER_ROUTE));
+    prepared.chain.reserve(chain.size());
+    for (const auto& item : chain) {
+        if (!item.is_object()) throw std::invalid_argument("Each processor must be an object");
+        if (!item.contains("type") || !item["type"].is_string())
+            throw std::invalid_argument("Each processor must have a string type");
+        if (!item.contains("params") || !item["params"].is_object())
+            throw std::invalid_argument("Each processor must have a params object");
+        const auto type = item["type"].get<std::string>();
+        nlohmann::json normalized;
+        auto processor = ProcessorRegistry::instance().create(type, item["params"], normalized);
+        prepared.chain.push_back(std::move(processor));
+        prepared.state.chain.push_back({{"type", type}, {"params", std::move(normalized)}});
+    }
+    return prepared;
+}
+
+nlohmann::json route_dsp_json(const RouteDspState& state) {
+    nlohmann::json result = {{"active", state.active}, {"gain", state.gain}, {"chain", state.chain}};
+    if (!state.warning.empty()) result["warning"] = state.warning;
+    return result;
+}
+
+// Do not narrow an unchecked ID: e.g. 4294967297 must never address route 1.
+bool parse_route_dsp_id(const httplib::Request& request, uint32_t& routeId) {
+    if (request.matches.size() <= 1) return false;
+    try {
+        const std::string text = request.matches[1];
+        size_t consumed = 0;
+        const auto value = std::stoull(text, &consumed);
+        if (consumed != text.size() || value == 0 || value > std::numeric_limits<uint32_t>::max()) return false;
+        routeId = static_cast<uint32_t>(value);
+        return true;
+    } catch (...) { return false; }
+}
+
+bool parse_persisted_route_id(const nlohmann::json& value, uint32_t& routeId) {
+    if (!value.is_number_integer()) return false;
+    if (!value.is_number_unsigned() && value.get<int64_t>() <= 0) return false;
+    const auto id = value.get<uint64_t>();
+    if (id == 0 || id > std::numeric_limits<uint32_t>::max()) return false;
+    routeId = static_cast<uint32_t>(id);
+    return true;
+}
+
+bool route_exists(const ClientManager& manager, uint32_t routeId) {
+    const auto routes = manager.route_snapshot();
+    return std::any_of(routes->begin(), routes->end(),
+        [routeId](const auto& route) { return route.id == routeId; });
+}
+
+void dsp_error(httplib::Response& response, int status, const std::string& message) {
+    response.status = status;
+    response.set_content(nlohmann::json({{"status", "error"}, {"message", message}}).dump(), "application/json");
 }
 
 } // namespace
@@ -331,12 +403,16 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
         {
             std::lock_guard<std::mutex> routeLock(m_route_lock);
             std::lock_guard<std::mutex> sessionLock(m_lock);
+            {
+                std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+                g_dspSettingsCache.clear();
+            }
             std::vector<AudioRoute> routes;
             uint32_t nextId = 1;
             if (settings.contains("routes") && settings["routes"].is_array()) {
                 for (const auto& value : settings["routes"]) {
                     AudioRoute route;
-                    route.id = value.value("id", 0u);
+                    if (!value.is_object() || !value.contains("id") || !parse_persisted_route_id(value["id"], route.id)) continue;
                     std::string src_ep = value.value("source", "");
                     std::string dst_ep = value.value("destination", "");
                     route.source_node = get_node_id(src_ep);
@@ -349,35 +425,42 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                         route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS ||
                         !std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) continue;
                     routes.push_back(route);
-                    nextId = std::max(nextId, route.id + 1);
+                    const auto maxId = std::numeric_limits<uint32_t>::max();
+                    nextId = std::max(nextId, route.id == maxId ? maxId : route.id + 1);
 
-                    if (m_dspEngine && value.contains("dsp") && value["dsp"].is_object()) {
+                    if (value.contains("dsp")) {
                         const auto& dsp = value["dsp"];
-                        uint32_t rId = route.id;
-                        
+                        PreparedRouteDsp prepared;
                         RouteDspState state;
-                        state.active = dsp.value("active", false);
-                        state.gain = dsp.value("gain", 1.0f);
-                        if (dsp.contains("chain") && dsp["chain"].is_array()) {
-                            state.chain = dsp["chain"].get<std::vector<nlohmann::json>>();
-                        }
-                        
-                        {
-                            std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
-                            g_dspSettingsCache[rId] = state;
-                        }
-
-                        std::vector<std::unique_ptr<AudioProcessor>> chain;
-                        if (dsp.contains("chain") && dsp["chain"].is_array()) {
-                            for (const auto& procJson : dsp["chain"]) {
-                                std::string type = procJson.value("type", "passthrough");
-                                nlohmann::json params = procJson.value("params", nlohmann::json::object());
-                                chain.push_back(create_processor(type, params));
+                        // Preserve the complete original chain on any validation failure,
+                        // even if it is not an array. Invalid gains fall back to unity.
+                        if (dsp.is_object()) {
+                            if (dsp.contains("chain")) state.chain = dsp["chain"];
+                            if (dsp.contains("gain") && dsp["gain"].is_number()) {
+                                const double gain = dsp["gain"].get<double>();
+                                if (std::isfinite(gain) && gain >= 0.0 && gain <= 8.0) state.gain = static_cast<float>(gain);
                             }
                         }
-                        m_dspEngine->update_route_chain(rId, std::move(chain));
-                        m_dspEngine->set_route_dsp_active(rId, state.active);
-                        m_dspEngine->set_route_gain(rId, state.gain);
+                        try {
+                            if (m_dspEngine && !m_dspEngine->supports_route_dsp(route.id))
+                                throw std::invalid_argument("Route ID exceeds DSP capacity");
+                            prepared = prepare_route_dsp(dsp);
+                            state = std::move(prepared.state);
+                        } catch (const std::exception& error) {
+                            prepared.chain.clear();
+                            state.active = false;
+                            state.warning = std::string("DSP bypassed: ") + error.what();
+                            std::cerr << "[DSP] Route " << route.id << ": " << state.warning << std::endl;
+                        }
+                        // Cache even without an engine; normal startup installs the
+                        // engine before restoring settings. Never index unsupported IDs.
+                        std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+                        if (m_dspEngine && m_dspEngine->supports_route_dsp(route.id)) {
+                            m_dspEngine->update_route_chain(route.id, std::move(prepared.chain));
+                            m_dspEngine->set_route_gain(route.id, state.gain);
+                            m_dspEngine->set_route_dsp_active(route.id, state.active);
+                        }
+                        g_dspSettingsCache[route.id] = std::move(state);
                     }
                 }
             }
@@ -533,6 +616,9 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
             return false;
         }
     }
+    if (m_next_route_id.load(std::memory_order_relaxed) == std::numeric_limits<uint32_t>::max()) {
+        error = "route ID space exhausted"; return false;
+    }
     route.id = assignedId = m_next_route_id.fetch_add(1);
     routes.push_back(std::move(route));
     std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
@@ -541,13 +627,19 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
 }
 
 bool ClientManager::remove_route(uint32_t routeId) {
-    std::lock_guard<std::mutex> lock(m_route_lock);
-    auto routes = *std::atomic_load(&m_routes);
-    const auto oldSize = routes.size();
-    routes.erase(std::remove_if(routes.begin(), routes.end(), [routeId](const auto& route) { return route.id == routeId; }), routes.end());
-    if (routes.size() == oldSize) return false;
-    std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
-    if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+    {
+        std::lock_guard<std::mutex> lock(m_route_lock);
+        auto routes = *std::atomic_load(&m_routes);
+        const auto oldSize = routes.size();
+        routes.erase(std::remove_if(routes.begin(), routes.end(), [routeId](const auto& route) { return route.id == routeId; }), routes.end());
+        if (routes.size() == oldSize) return false;
+        std::atomic_store(&m_routes, std::make_shared<const std::vector<AudioRoute>>(std::move(routes)));
+        if (m_dspEngine) m_dspEngine->mark_graph_dirty();
+    }
+    // Never acquire the route/session locks while holding the DSP cache lock.
+    // POST rechecks the immutable route snapshot under this same cache lock.
+    std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+    g_dspSettingsCache.erase(routeId);
     return true;
 }
 
@@ -736,6 +828,11 @@ bool WebServer::start() {
             }
         });
 
+        m_httpServer->Get("/api/dsp/available", [](const httplib::Request&, httplib::Response& response) {
+            response.set_header("Cache-Control", "no-store");
+            response.set_content(ProcessorRegistry::instance().discovery().dump(2), "application/json");
+        });
+
         m_httpServer->Get("/api/dsp", [this](const httplib::Request&, httplib::Response& response) {
             auto* gainProc = m_dspEngine.get_gain_processor();
             auto* compProc = m_dspEngine.get_compressor();
@@ -862,6 +959,11 @@ bool WebServer::start() {
                 rj["destination_channel"] = r.destination_channel;
                 rj["gain"] = r.gain;
                 rj["enabled"] = r.enabled;
+                {
+                    std::lock_guard<std::mutex> cacheLock(g_dspCacheLock);
+                    const auto cached = g_dspSettingsCache.find(r.id);
+                    rj["dsp_active"] = cached != g_dspSettingsCache.end() && cached->second.active;
+                }
                 routes.push_back(rj);
             }
             j["routes"] = routes;
@@ -905,59 +1007,40 @@ bool WebServer::start() {
 
         m_httpServer->Get(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
             uint32_t routeId = 0;
-            if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
-            if (routeId == 0) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"invalid route id\"}", "application/json"); return; }
-
+            if (!parse_route_dsp_id(request, routeId)) { dsp_error(response, 400, "invalid route id"); return; }
             std::lock_guard<std::mutex> lock(g_dspCacheLock);
-            if (g_dspSettingsCache.count(routeId)) {
-                const auto& s = g_dspSettingsCache[routeId];
-                nlohmann::json j;
-                j["active"] = s.active;
-                j["gain"] = s.gain;
-                j["chain"] = s.chain;
-                response.set_content(j.dump(2), "application/json");
-            } else {
-                response.set_content("{\"active\":false,\"gain\":1.0,\"chain\":[]}", "application/json");
-            }
+            if (!route_exists(m_clientMgr, routeId)) { dsp_error(response, 404, "route not found"); return; }
+            if (!m_dspEngine.supports_route_dsp(routeId)) { dsp_error(response, 400, "Route ID exceeds DSP capacity"); return; }
+            const auto cached = g_dspSettingsCache.find(routeId);
+            const auto state = cached == g_dspSettingsCache.end() ? RouteDspState{} : cached->second;
+            response.set_content(route_dsp_json(state).dump(2), "application/json");
         });
 
         m_httpServer->Post(R"(/api/routes/(\d+)/dsp)", [this](const httplib::Request& request, httplib::Response& response) {
             uint32_t routeId = 0;
-            if (request.matches.size() > 1) { try { routeId = std::stoul(request.matches[1]); } catch (...) {} }
-            if (routeId == 0) { response.status = 400; response.set_content("{\"status\":\"error\",\"message\":\"invalid route id\"}", "application/json"); return; }
+            if (!parse_route_dsp_id(request, routeId)) { dsp_error(response, 400, "invalid route id"); return; }
+            if (!route_exists(m_clientMgr, routeId)) { dsp_error(response, 404, "route not found"); return; }
+            if (!m_dspEngine.supports_route_dsp(routeId)) { dsp_error(response, 400, "Route ID exceeds DSP capacity"); return; }
 
             try {
-                auto body = nlohmann::json::parse(request.body);
-                bool active = body.value("active", false);
-                float gain = body.value("gain", 1.0f);
-                
-                std::vector<std::unique_ptr<AudioProcessor>> chain;
-                std::vector<nlohmann::json> chainJson;
-
-                if (body.contains("chain") && body["chain"].is_array()) {
-                    for (const auto& proc : body["chain"]) {
-                        std::string type = proc.value("type", "passthrough");
-                        nlohmann::json params = proc.value("params", nlohmann::json::object());
-                        chain.push_back(create_processor(type, params));
-                        nlohmann::json pj;
-                        pj["type"] = type; pj["params"] = params;
-                        chainJson.push_back(pj);
-                    }
-                }
-
-                m_dspEngine.set_route_dsp_active(routeId, active);
-                m_dspEngine.set_route_gain(routeId, gain);
-                m_dspEngine.update_route_chain(routeId, std::move(chain));
-
+                auto prepared = prepare_route_dsp(nlohmann::json::parse(request.body));
+                auto result = route_dsp_json(prepared.state);
+                result["status"] = "ok";
+                const auto content = result.dump(2);
                 {
+                    // Serialize engine publication and its canonical cache update.
+                    // Snapshot reads do not acquire the route lock, avoiding inversion
+                    // with settings persistence and route removal.
                     std::lock_guard<std::mutex> lock(g_dspCacheLock);
-                    g_dspSettingsCache[routeId] = { active, gain, chainJson };
+                    if (!route_exists(m_clientMgr, routeId)) { dsp_error(response, 404, "route not found"); return; }
+                    m_dspEngine.update_route_chain(routeId, std::move(prepared.chain));
+                    m_dspEngine.set_route_gain(routeId, prepared.state.gain);
+                    m_dspEngine.set_route_dsp_active(routeId, prepared.state.active);
+                    g_dspSettingsCache[routeId] = std::move(prepared.state);
                 }
-
-                response.set_content("{\"status\":\"ok\"}", "application/json");
-            } catch (const std::exception& e) {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"" + json_escape(e.what()) + "\"}", "application/json");
+                response.set_content(content, "application/json");
+            } catch (const std::exception& error) {
+                dsp_error(response, 400, error.what());
             }
         });
 
@@ -1006,7 +1089,8 @@ bool WebServer::start() {
                     const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
                     if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
                     auto& bank = (type == "playback") ? m_metrics.playback[endpoint] : m_metrics.capture[endpoint];
-                    bank[channel].clipped.store(false); bank[channel].peak_hold_db.store(-60.0f);
+                    bank[channel].clipped.store(false);
+                    bank[channel].peak_hold_db.store(-60.0f);
                 }
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) {
