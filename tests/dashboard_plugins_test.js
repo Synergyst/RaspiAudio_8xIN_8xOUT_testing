@@ -15,15 +15,19 @@ class Element {
     }
     set value(value) { this._value = String(value); }
     get value() { return this._value ?? ''; }
-    appendChild(child) { this.children.push(child); return child; }
+    appendChild(child) { child.parent = this; this.children.push(child); return child; }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
     append(...children) { children.forEach(child => this.appendChild(child)); }
     replaceChildren(...children) { this.children = []; this.append(...children); }
     addEventListener(event, callback) { (this.listeners[event] ??= []).push(callback); }
     setAttribute(name, value) { this.attributes[name] = value; }
     querySelectorAll(selector) {
         const tags = selector.split(',').map(tag => tag.trim().toUpperCase());
+        const matches = child => tags.includes(child.tagName) ||
+            (selector.startsWith('.') && child.className.split(' ').includes(selector.slice(1)));
         return this.children.flatMap(child => [
-            ...(tags.includes(child.tagName) ? [child] : []), ...child.querySelectorAll(selector)
+            ...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)
         ]);
     }
     setCustomValidity(message) { this.validationMessage = message; }
@@ -178,5 +182,31 @@ context.discoveryResponse = { schema_version: 1, max_chain_length: 16, processor
     assert.equal(elements.get('dsp-add').disabled, true);
     assert.equal(elements.get('route-apply').disabled, true);
     assert.equal(elements.get('new-processor-type').children.length, 0);
-    console.log('PASS: dynamic menu, typed controls, backend defaults, zero/false, drafts/cancel, reordering, missing plugins and error states');
+    // A reconnect with the same identity must replace channel rows, not retain
+    // the first width forever. Keep canvas position while rebuilding the rows.
+    run('graph = {endpoints:[{id:"hardware/card/with/slash/playback",direction:"destination",channels:32}],routes:[]}; renderPatchbay();');
+    assert.equal(run('endpointBlocks.get(graph.endpoints[0].id).children.length'), 33);
+    run('nodePositions[graph.endpoints[0].id] = {x:50,y:90}; graph.endpoints[0].channels = 3; renderPatchbay();');
+    assert.equal(run('endpointBlocks.get(graph.endpoints[0].id).children.length'), 4);
+    assert.equal(run('endpointBlocks.get(graph.endpoints[0].id).style.transform'), 'translate(50px, 90px)');
+    run('graph.endpoints[0].channels = 24; renderPatchbay();');
+    assert.equal(run('endpointBlocks.get(graph.endpoints[0].id).children.length'), 25);
+    context.deviceResponse = [
+        {id:"card/quoted'",name:'<Card>',backend:'alsa',is_capture:true,active:false,capture_channels:12,playback_channels:24,max_channels:254},
+        {id:"card/quoted'",name:'<Card>',backend:'alsa',is_capture:false,active:false,capture_channels:12,playback_channels:24,max_channels:254},
+    ];
+    run('fetchAPI = async () => deviceResponse;');
+    await run('loadDevices()');
+    const rows = elements.get('device-list').children.filter(child => child.className.startsWith('device-item'));
+    assert.equal(rows.length, 1); // Paired directions grouped by exact opaque ID.
+    assert.equal(rows[0].children[0].children[0].textContent, '<Card>');
+    const hardwareInputs = rows[0].querySelectorAll('input');
+    assert.deepEqual(hardwareInputs.map(input => input.value), ['12','24']);
+    assert(hardwareInputs.every(input => Number(input.max) === 254 && !input.disabled));
+    context.requests.length = 0;
+    run('loadDevices = async () => {}; fetchAPI = async (url, options) => { requests.push({url,options}); return {status:"ok"}; };');
+    await rows[0].children[1].onclick();
+    assert.match(context.requests[0].url, /capture_channels=12/);
+    assert.match(context.requests[0].url, /playback_channels=24/);
+    console.log('PASS: plugin UI, drafts/apply/save, variable-width reconnect rows and hardware channel configuration');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -21,9 +21,15 @@ static std::atomic<uint32_t> g_processCount{0};
 
 DspEngine::DspEngine(DeviceManager& deviceManager, ClientManager& clientManager, AudioMetrics& metrics, ToneControls& tone)
     : m_deviceManager(deviceManager), m_clientManager(clientManager), m_metrics(metrics), m_tone(tone) {
-    m_nodeBufferPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
-    m_feedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
-    m_nextFeedbackPool.resize(MAX_NODES * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH, 0.0f);
+    static_assert(CM5_MAX_CHANNELS <= MA_MAX_CHANNELS, "Application width exceeds miniaudio");
+    // Explicit bounded graph storage: 3 * 256 * 64 * 254 floats (about 48 MiB).
+    // Allocate before starting DSP. Per-node strides and processing widths remain
+    // variable; adding/reopening an endpoint never reallocates audio buffers.
+    const size_t samples = static_cast<size_t>(CM5_BUFFER_FRAMES) * CM5_MAX_CHANNELS;
+    m_nodeBuffers.assign(MAX_NODES, std::vector<float>(samples, 0.0f));
+    m_feedbackBuffers.assign(MAX_NODES, std::vector<float>(samples, 0.0f));
+    m_nextFeedbackBuffers.assign(MAX_NODES, std::vector<float>(samples, 0.0f));
+    m_nodeWidths.resize(MAX_NODES, 0);
     m_routeScratchBuffer.resize(CM5_BUFFER_FRAMES, 0.0f);
     m_gainProc = std::make_unique<GainProcessor>(1.0f);
     m_compProc = std::make_unique<CompressorProcessor>(0.7f, 4.0f);
@@ -117,14 +123,18 @@ void DspEngine::update_route_dsp(uint32_t routeId,
     rdsp.current_idx.store(write_idx);
 }
 
-void DspEngine::update_meters(float* buffer, unsigned channels, const std::string& endpointId, bool isCapture) {
-    if (!buffer) return;
+void DspEngine::update_meters(float* buffer, unsigned channels, unsigned stride,
+                              const std::string& endpointId, bool isCapture) {
+    if (!buffer || stride == 0 || channels > CM5_MAX_CHANNELS) return;
     std::lock_guard<std::mutex> metricsLock(m_metrics.lock);
-    auto& targetMeters = isCapture ? m_metrics.capture[endpointId] : m_metrics.playback[endpointId];
-    for (unsigned ch = 0; ch < std::min(channels, (unsigned)CM5_MAX_CHANNELS); ++ch) {
+    auto& banks = isCapture ? m_metrics.capture : m_metrics.playback;
+    const auto bank = banks.find(endpointId);
+    if (bank == banks.end() || bank->second.size() != channels) return;
+    auto& targetMeters = bank->second;
+    for (unsigned ch = 0; ch < channels; ++ch) {
         float sumSq = 0.0f, peak = 0.0f;
         for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
-            float sample = buffer[f * CM5_INTERNAL_WIDTH + ch];
+            float sample = buffer[f * stride + ch];
             float absS = std::abs(sample);
             sumSq += sample * sample;
             if (absS > peak) peak = absS;
@@ -149,9 +159,56 @@ void DspEngine::rebuild_graph() {
     const auto validNode = [](NodeId node) {
         return node >= 0 && static_cast<size_t>(node) < MAX_NODES;
     };
+
+    // Resolve actual widths before route sorting/validation. Real endpoint widths
+    // are authoritative; only offline/virtual nodes infer a minimum from routes.
+    std::fill(m_nodeWidths.begin(), m_nodeWidths.end(), 0);
+    std::vector<bool> fixedWidth(MAX_NODES, false);
+    std::vector<int> direction(MAX_NODES, 0); // 1 source, -1 destination, 0 offline/virtual.
+    direction[NODE_TONE_GENERATOR] = 1;
+    m_nodeWidths[NODE_TONE_GENERATOR] = 1;
+    fixedWidth[NODE_TONE_GENERATOR] = true;
+    for (const auto& dev : nextOwners.hardware) {
+        const std::string endpoint = "hardware/" + dev->get_original_id() +
+                                     (dev->get_info().is_capture ? "/capture" : "/playback");
+        const NodeId id = m_clientManager.get_node_id(endpoint);
+        if (validNode(id)) {
+            m_nodeWidths[id] = std::min(dev->get_info().channels, CM5_MAX_CHANNELS);
+            fixedWidth[id] = true;
+            direction[id] = dev->get_info().is_capture ? 1 : -1;
+        }
+    }
+    for (const auto& session : nextOwners.sessions) {
+        if (!session->media_ready.load(std::memory_order_acquire)) continue;
+        const std::string base = "client/" + session->get_client_key();
+        const NodeId capture = m_clientManager.get_node_id(base + "/capture");
+        const NodeId playback = m_clientManager.get_node_id(base + "/playback");
+        if (validNode(capture)) {
+            m_nodeWidths[capture] = std::min(session->input_channels.load(), CM5_MAX_CHANNELS);
+            fixedWidth[capture] = true;
+            direction[capture] = 1;
+        }
+        if (validNode(playback)) {
+            m_nodeWidths[playback] = std::min(session->output_channels.load(), CM5_MAX_CHANNELS);
+            fixedWidth[playback] = true;
+            direction[playback] = -1;
+        }
+    }
+    if (routes_ptr) for (const auto& route : *routes_ptr) {
+        if (!route.enabled || !validNode(route.source_node) || !validNode(route.destination_node)) continue;
+        if (!fixedWidth[route.source_node] && route.source_channel < CM5_MAX_CHANNELS)
+            m_nodeWidths[route.source_node] = std::max(m_nodeWidths[route.source_node], route.source_channel + 1);
+        if (!fixedWidth[route.destination_node] && route.destination_channel < CM5_MAX_CHANNELS)
+            m_nodeWidths[route.destination_node] = std::max(m_nodeWidths[route.destination_node], route.destination_channel + 1);
+    }
+
     const auto validRoute = [&](const AudioRoute& route) {
-        return route.enabled && validNode(route.source_node) && validNode(route.destination_node) &&
-               route.source_channel < CM5_INTERNAL_WIDTH && route.destination_channel < CM5_INTERNAL_WIDTH;
+        if (!route.enabled || !validNode(route.source_node) || !validNode(route.destination_node)) return false;
+        const unsigned sourceWidth = m_nodeWidths[route.source_node];
+        const unsigned destinationWidth = m_nodeWidths[route.destination_node];
+        return direction[route.source_node] != -1 && direction[route.destination_node] != 1 &&
+               sourceWidth > 0 && destinationWidth > 0 &&
+               route.source_channel < sourceWidth && route.destination_channel < destinationWidth;
     };
     std::set<NodeId> activeNodes;
     std::unordered_map<NodeId, std::vector<NodeId>> adj;
@@ -169,15 +226,15 @@ void DspEngine::rebuild_graph() {
         const std::string endpoint = "hardware/" + dev->get_original_id() +
                                      (dev->get_info().is_capture ? "/capture" : "/playback");
         const NodeId id = m_clientManager.get_node_id(endpoint);
-        if (validNode(id)) activeNodes.insert(id);
+        if (validNode(id) && m_nodeWidths[id] > 0) activeNodes.insert(id);
     }
     for (const auto& session : nextOwners.sessions) {
         if (!session->media_ready.load(std::memory_order_acquire)) continue;
         const std::string base = "client/" + session->get_client_key();
         const NodeId capture = m_clientManager.get_node_id(base + "/capture");
         const NodeId playback = m_clientManager.get_node_id(base + "/playback");
-        if (validNode(capture)) activeNodes.insert(capture);
-        if (validNode(playback)) activeNodes.insert(playback);
+        if (validNode(capture) && m_nodeWidths[capture] > 0) activeNodes.insert(capture);
+        if (validNode(playback) && m_nodeWidths[playback] > 0) activeNodes.insert(playback);
     }
     activeNodes.insert(NODE_TONE_GENERATOR);
     std::vector<NodeId> sortedNodes;
@@ -197,18 +254,25 @@ void DspEngine::rebuild_graph() {
     for (size_t i = 0; i < m_executionOrder.size(); ++i)
         m_nodePosition[m_executionOrder[i]] = static_cast<int>(i);
     for (auto& handler : m_nodeHandlers) handler = {};
+
     for (NodeId node : m_executionOrder) {
+        if (!validNode(node) || m_nodeWidths[node] == 0 || m_nodeWidths[node] > CM5_MAX_CHANNELS) continue;
+        const size_t samples = static_cast<size_t>(CM5_BUFFER_FRAMES) * m_nodeWidths[node];
+        std::fill_n(m_nodeBuffers[node].data(), samples, 0.0f);
+        std::fill_n(m_feedbackBuffers[node].data(), samples, 0.0f);
+        std::fill_n(m_nextFeedbackBuffers[node].data(), samples, 0.0f);
         const std::string endpoint = m_clientManager.get_endpoint_from_id(node);
         if (node == NODE_TONE_GENERATOR) {
-            m_nodeHandlers[node] = {NodeHandler::Type::TONE, nullptr, CM5_INTERNAL_WIDTH, "tone/generator", true};
+            m_nodeHandlers[node] = {NodeHandler::Type::TONE, nullptr, 1, "tone/generator", true};
         } else {
             // Original hardware IDs and client keys may contain arbitrary '/'.
             // Match complete endpoint strings rather than splitting at a slash.
             for (const auto& dev : nextOwners.hardware) {
                 const bool capture = dev->get_info().is_capture;
                 if (endpoint == "hardware/" + dev->get_original_id() + (capture ? "/capture" : "/playback")) {
+                    const unsigned channels = std::min(dev->get_info().channels, CM5_MAX_CHANNELS);
                     m_nodeHandlers[node] = {capture ? NodeHandler::Type::HARDWARE_CAPTURE : NodeHandler::Type::HARDWARE_PLAYBACK,
-                        dev.get(), dev->get_info().channels, endpoint, true};
+                        dev.get(), channels, endpoint, channels > 0};
                     break;
                 }
             }
@@ -218,13 +282,30 @@ void DspEngine::rebuild_graph() {
                 const bool capture = endpoint == base + "/capture";
                 if (capture || endpoint == base + "/playback") {
                     m_nodeHandlers[node] = {capture ? NodeHandler::Type::CLIENT_CAPTURE : NodeHandler::Type::CLIENT_PLAYBACK,
-                        session.get(), capture ? session->input_channels.load() : session->output_channels.load(), endpoint, true};
+                        session.get(), std::min(capture ? session->input_channels.load() : session->output_channels.load(), CM5_MAX_CHANNELS), endpoint, true};
                     break;
                 }
             }
         }
         if (!m_nodeHandlers[node].active)
-            m_nodeHandlers[node] = {NodeHandler::Type::VIRTUAL, nullptr, CM5_INTERNAL_WIDTH, "virtual/" + std::to_string(node), true};
+            m_nodeHandlers[node] = {NodeHandler::Type::VIRTUAL, nullptr, m_nodeWidths[node], "virtual/" + std::to_string(node), true};
+    }
+    // Prepare meter widths only when rebuilding a layout, never each block.
+    {
+        std::lock_guard<std::mutex> metricsLock(m_metrics.lock);
+        for (NodeId node : m_executionOrder) {
+            const auto& handler = m_nodeHandlers[node];
+            const bool capture = handler.type == NodeHandler::Type::HARDWARE_CAPTURE ||
+                                 handler.type == NodeHandler::Type::CLIENT_CAPTURE;
+            const bool playback = handler.type == NodeHandler::Type::HARDWARE_PLAYBACK ||
+                                  handler.type == NodeHandler::Type::CLIENT_PLAYBACK;
+            if (!capture && !playback) continue;
+            auto& bank = capture ? m_metrics.capture[handler.endpointId] : m_metrics.playback[handler.endpointId];
+            if (bank.size() != handler.channels) {
+                std::vector<ChannelMeter> prepared(handler.channels);
+                bank.swap(prepared);
+            }
+        }
     }
     m_currentRoutes = routes_ptr;
     for (auto& routes : m_adjList) routes.clear();
@@ -277,8 +358,12 @@ void DspEngine::process_audio() {
         rebuild_graph();
         m_builtRevision = target;
     }
-    std::fill(m_nodeBufferPool.begin(), m_nodeBufferPool.end(), 0.0f);
-    std::fill(m_nextFeedbackPool.begin(), m_nextFeedbackPool.end(), 0.0f);
+    for (NodeId node : m_executionOrder) {
+        if (node >= 0 && static_cast<size_t>(node) < MAX_NODES) {
+            std::fill_n(m_nodeBuffers[node].data(), static_cast<size_t>(CM5_BUFFER_FRAMES) * m_nodeWidths[node], 0.0f);
+            std::fill_n(m_nextFeedbackBuffers[node].data(), static_cast<size_t>(CM5_BUFFER_FRAMES) * m_nodeWidths[node], 0.0f);
+        }
+    }
 
     for (NodeId node : m_executionOrder) {
         float* buf = get_buffer(node);
@@ -290,7 +375,7 @@ void DspEngine::process_audio() {
                 float freq = m_tone.frequency_hz, amp = m_tone.amplitude;
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) {
                     float sample = std::sin(m_tonePhase * 2.0 * M_PI) * amp;
-                    buf[f * CM5_INTERNAL_WIDTH + 0] += sample;
+                    buf[f] += sample;
                     m_tonePhase += freq / m_engineSampleRate;
                     if (m_tonePhase > 1.0) m_tonePhase -= 1.0;
                 }
@@ -298,39 +383,41 @@ void DspEngine::process_audio() {
         } else if (handler.type == NodeHandler::Type::HARDWARE_CAPTURE) {
             auto* dev = static_cast<HardwareDevice*>(handler.ptr);
             const unsigned chs = handler.channels;
-            if (chs > 0 && chs <= CM5_MAX_CHANNELS && dev->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
+            if (chs > 0 && chs <= CM5_MAX_CHANNELS && m_nodeWidths[node] == chs && dev->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
                 const size_t bytes = CM5_BUFFER_FRAMES * chs * sizeof(float);
                 // A short read must not replay samples left by the previous block.
                 std::fill_n(dev->io_buffer.data(), CM5_BUFFER_FRAMES * chs, 0.0f);
                 dev->get_input_buffer().read(dev->io_buffer.data(), bytes);
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f)
                     for (unsigned ch = 0; ch < chs; ++ch)
-                        buf[f * CM5_INTERNAL_WIDTH + ch] += dev->io_buffer[f * chs + ch];
-                update_meters(buf, chs, handler.endpointId, true);
+                        buf[f * chs + ch] += dev->io_buffer[f * chs + ch];
+                update_meters(buf, chs, chs, handler.endpointId, true);
             }
         } else if (handler.type == NodeHandler::Type::CLIENT_CAPTURE) {
             auto* session = static_cast<WebClientSession*>(handler.ptr);
             const unsigned chs = handler.channels;
-            if (chs > 0 && chs <= CM5_MAX_CHANNELS && session->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
+            if (chs > 0 && chs <= CM5_MAX_CHANNELS && m_nodeWidths[node] == chs && session->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
                 std::fill_n(session->io_buffer.data(), CM5_BUFFER_FRAMES * chs, 0.0f);
                 session->incoming_rb.read(session->io_buffer.data(), CM5_BUFFER_FRAMES * chs * sizeof(float));
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f)
                     for (unsigned ch = 0; ch < chs; ++ch)
-                        buf[f * CM5_INTERNAL_WIDTH + ch] += session->io_buffer[f * chs + ch];
-                update_meters(buf, chs, handler.endpointId, true);
+                        buf[f * chs + ch] += session->io_buffer[f * chs + ch];
+                update_meters(buf, chs, chs, handler.endpointId, true);
             }
         }
 
         if (node >= 0 && node < (int)MAX_NODES) {
             for (const auto* route : m_adjList[node]) {
                 float* dstBuf = get_buffer(route->destination_node);
-                if (dstBuf && route->source_channel < CM5_INTERNAL_WIDTH && route->destination_channel < CM5_INTERNAL_WIDTH) {
+                if (dstBuf && route->source_channel < m_nodeWidths[node] &&
+                    route->destination_channel < m_nodeWidths[route->destination_node]) {
                     bool isFeedback = false;
                     if (m_nodePosition[node] != -1 && m_nodePosition[route->destination_node] != -1) {
                         if (m_nodePosition[node] >= m_nodePosition[route->destination_node]) isFeedback = true;
                     }
                     float* srcData = isFeedback ? get_feedback_buffer(node) : buf;
-                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) m_routeScratchBuffer[f] = srcData[f * CM5_INTERNAL_WIDTH + route->source_channel];
+                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f)
+                        m_routeScratchBuffer[f] = srcData[f * m_nodeWidths[node] + route->source_channel];
                     float currentGain = route->gain;
                     if (supports_route_dsp(route->id)) {
                         RouteDsp& rdsp = m_routeDsp[route->id];
@@ -349,38 +436,42 @@ void DspEngine::process_audio() {
                         }
                         rdsp.reader_idx.store(-1);
                     }
-                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f) dstBuf[f * CM5_INTERNAL_WIDTH + route->destination_channel] += m_routeScratchBuffer[f] * currentGain;
+                    for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f)
+                        dstBuf[f * m_nodeWidths[route->destination_node] + route->destination_channel] += m_routeScratchBuffer[f] * currentGain;
                 }
             }
         }
 
         if (handler.type == NodeHandler::Type::HARDWARE_PLAYBACK) {
             auto* dev = static_cast<HardwareDevice*>(handler.ptr);
-            m_gainProc->process(buf, CM5_BUFFER_FRAMES, CM5_INTERNAL_WIDTH);
-            m_compProc->process(buf, CM5_BUFFER_FRAMES, CM5_INTERNAL_WIDTH);
+            m_gainProc->process(buf, CM5_BUFFER_FRAMES, handler.channels);
+            m_compProc->process(buf, CM5_BUFFER_FRAMES, handler.channels);
             const unsigned chs = handler.channels;
-            if (chs > 0 && chs <= CM5_MAX_CHANNELS && dev->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
+            if (chs > 0 && chs <= CM5_MAX_CHANNELS && m_nodeWidths[node] == chs && dev->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f)
                     for (unsigned ch = 0; ch < chs; ++ch)
-                        dev->io_buffer[f * chs + ch] = buf[f * CM5_INTERNAL_WIDTH + ch];
-                update_meters(buf, chs, handler.endpointId, false);
+                        dev->io_buffer[f * chs + ch] = buf[f * chs + ch];
+                update_meters(buf, chs, handler.channels, handler.endpointId, false);
                 dev->get_output_buffer().write(dev->io_buffer.data(), CM5_BUFFER_FRAMES * chs * sizeof(float));
             }
         } else if (handler.type == NodeHandler::Type::CLIENT_PLAYBACK) {
             auto* session = static_cast<WebClientSession*>(handler.ptr);
             const unsigned chs = handler.channels;
-            if (chs > 0 && chs <= CM5_MAX_CHANNELS && session->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
+            if (chs > 0 && chs <= CM5_MAX_CHANNELS && m_nodeWidths[node] == chs && session->io_buffer.size() >= CM5_BUFFER_FRAMES * chs) {
                 for (size_t f = 0; f < CM5_BUFFER_FRAMES; ++f)
                     for (unsigned ch = 0; ch < chs; ++ch)
-                        session->io_buffer[f * chs + ch] = buf[f * CM5_INTERNAL_WIDTH + ch];
+                        session->io_buffer[f * chs + ch] = buf[f * chs + ch];
                 session->outgoing_rb.write(session->io_buffer.data(), CM5_BUFFER_FRAMES * chs * sizeof(float));
-                update_meters(buf, chs, handler.endpointId, false);
+                update_meters(buf, chs, handler.channels, handler.endpointId, false);
             }
         }
         float* nextFb = get_next_feedback_buffer(node);
-        if (nextFb) std::memcpy(nextFb, buf, CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH * sizeof(float));
+        if (nextFb) std::memcpy(nextFb, buf, CM5_BUFFER_FRAMES * handler.channels * sizeof(float));
     }
-    std::swap(m_feedbackPool, m_nextFeedbackPool);
+    for (NodeId node : m_executionOrder) {
+        if (node >= 0 && static_cast<size_t>(node) < MAX_NODES)
+            std::swap(m_feedbackBuffers[node], m_nextFeedbackBuffers[node]);
+    }
     // A waiter can now safely act on this revision: no old block is in flight.
     m_adoptedRevision.store(target, std::memory_order_release);
     m_revisionChanged.notify_all();

@@ -68,7 +68,7 @@ private:
     void processing_loop();
     void process_audio();
     void rebuild_graph();
-    void update_meters(float* buffer, unsigned channels, const std::string& endpointId, bool isCapture);
+    void update_meters(float* buffer, unsigned channels, unsigned stride, const std::string& endpointId, bool isCapture);
 
     DeviceManager& m_deviceManager;
     ClientManager& m_clientManager;
@@ -80,9 +80,13 @@ private:
     static constexpr size_t MAX_NODES = 256;
     static constexpr size_t MAX_ROUTES = 1024;
 
-    std::vector<float> m_nodeBufferPool;
-    std::vector<float> m_feedbackPool;
-    std::vector<float> m_nextFeedbackPool;
+    // Fixed-capacity backing storage is allocated before DSP starts (~48 MiB
+    // for all three banks). Each node uses only its negotiated variable stride;
+    // no endpoint change reallocates these buffers while processing.
+    std::vector<std::vector<float>> m_nodeBuffers;
+    std::vector<std::vector<float>> m_feedbackBuffers;
+    std::vector<std::vector<float>> m_nextFeedbackBuffers;
+    std::vector<unsigned> m_nodeWidths;
     std::vector<NodeId> m_executionOrder;
     int m_nodePosition[MAX_NODES];
     NodeHandler m_nodeHandlers[MAX_NODES];
@@ -134,15 +138,15 @@ private:
 
     inline float* get_buffer(NodeId id) {
         if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
-        return &m_nodeBufferPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
+        return m_nodeBuffers[static_cast<size_t>(id)].empty() ? nullptr : m_nodeBuffers[static_cast<size_t>(id)].data();
     }
     inline float* get_feedback_buffer(NodeId id) {
         if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
-        return &m_feedbackPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
+        return m_feedbackBuffers[static_cast<size_t>(id)].empty() ? nullptr : m_feedbackBuffers[static_cast<size_t>(id)].data();
     }
     inline float* get_next_feedback_buffer(NodeId id) {
         if (id < 0 || static_cast<size_t>(id) >= MAX_NODES) return nullptr;
-        return &m_nextFeedbackPool[static_cast<size_t>(id) * CM5_BUFFER_FRAMES * CM5_INTERNAL_WIDTH];
+        return m_nextFeedbackBuffers[static_cast<size_t>(id)].empty() ? nullptr : m_nextFeedbackBuffers[static_cast<size_t>(id)].data();
     }
 };
 

@@ -6,6 +6,22 @@ finite stable identities and shutdown; not a completed production-hardening clai
 **Operational reference:** [README.md](README.md), [docs/PLUGINS.md](docs/PLUGINS.md),
 and current source/tests. The long roadmap below is explicitly archived.
 
+## Channel correctness update
+
+The >8-channel failure was real: opened hardware streams with more than eight
+channels passed activation but the engine skipped their entire capture/playback
+blocks. Graph buffers/strides, meters and route checks now support actual endpoint
+widths up to the vendored miniaudio bound (254), with bounded preallocated audio
+storage. WebSocket clients retain their separate eight-channel transport bound.
+Hardware Manager stream requests distinguish automatic from explicit capture and
+playback widths and persist in `device_streams`. No device-name/max-channel guesses
+or system profile changes. Native/backend diagnostics and opt-in joint capability
+tuples are exposed. Same-ID dashboard reconnects rebuild channel rows.
+RaspiAudio physical loopback identity/crosstalk remains unverified; see README.
+Build, channel sample-path, null negotiation/lifecycle, plugin, dashboard and
+reliability/API tests passed; plain/TLS process shutdown passed with 21 graceful
+exits. No physical device/profile or user service was changed.
+
 ## Current reliable scope and P0 implementation register
 
 The application is now a channel-level visual patchbay with independent hardware,
@@ -23,7 +39,7 @@ the old per-channel history charts or raw-value visibility UI.
 | Completion | Accepted POST responses carry `accepted_revision`, `adopted_revision`, `adopted`, `persisted`, `persisted_revision`. Wait is up to **1,500 ms**, or ends early if DSP stops. 503 pending can still apply later; it is not rollback. Rejected/stopping requests need not have acceptance fields. DELETE currently omits `persisted_revision`. |
 | SAVE | Top SAVE never reads open/abandoned inspector drafts or unapplied forms. It saves accepted, engine-adopted server state. No adoption: 503 and **no serializer/file write**. Adopted but save failed: 500 with `adopted:true,persisted:false`; the live change remains applied. Device activate/deactivate use adoption then autosave and report failures. |
 | Revisions | Graph GET uses the real requested `revision` plus `adopted_revision` and `persisted_revision`, not hardcoded 1. Progress counters are process-local, not CAS/ETags, disk scene versions or device-render acknowledgements; restored files do not restore counters. |
-| DSP publication | Chain, DSP master gain and bypass/active share a three-slot pinned publication. Ordinary route gain/enabled still use a separate immutable route snapshot; the entire APPLY is not an instantaneous sample-level swap while in flight. DSP block remains **64 frames**, 48 kHz, width 8. |
+| DSP publication | Chain, DSP master gain and bypass/active share a three-slot pinned publication. Ordinary route gain/enabled still use a separate immutable route snapshot; the entire APPLY is not an instantaneous sample-level swap while in flight. DSP block remains **64 frames**, 48 kHz; hardware graph strides now follow the negotiated endpoint width (up to 254). |
 | Graph correctness | Revision/dirty handling preserves updates published during rebuild. Disabled/invalid routes do not affect ordering; active hardware and media-ready client endpoints remain scheduled for silence with no enabled routes; short capture reads are zero-filled. **Enabled cycles remain unsupported**, not automatically scheduled/repaired. |
 | Identity/capacity | Endpoint numeric IDs survive disconnect/deactivation; loading registers saved endpoint strings even offline, and same-identity reconnect rebinds handlers. Full endpoint strings, including embedded slashes, are matched. At most **255 non-tone endpoint identities** per process; no unrelated-ID recycling. New registration fails at capacity. Route DSP IDs remain `1..1023`. |
 | WS initialization | Application sessions are created only on **Open**, not TCP accept/pre-upgrade. First hello initializes rings once before readiness. Same identity/channel hello is idempotently accepted; changing identity/channels requires reconnect, not live resize. A new name alone does not rename a ready session. Binary before readiness is ignored. |

@@ -58,8 +58,14 @@ std::string json_escape(const std::string& value) {
 
 unsigned query_uint(const httplib::Request& request, const char* name, unsigned fallback) {
     if (!request.has_param(name)) return fallback;
-    try { return static_cast<unsigned>(std::stoul(request.get_param_value(name))); }
-    catch (...) { return fallback; }
+    try {
+        const auto text = request.get_param_value(name);
+        if (text.empty() || text[0] == '-') return fallback;
+        size_t used = 0;
+        const auto value = std::stoull(text, &used);
+        if (used != text.size() || value > std::numeric_limits<unsigned>::max()) return fallback;
+        return static_cast<unsigned>(value);
+    } catch (...) { return fallback; }
 }
 
 float query_float(const httplib::Request& request, const char* name, float fallback) {
@@ -103,9 +109,20 @@ std::string read_favicon() {
     return contents.str();
 }
 
-nlohmann::json build_meter_json(const std::array<ChannelMeter, CM5_MAX_CHANNELS>& meters, unsigned channels) {
+nlohmann::json stream_layout_json(const AudioDeviceInfo& info) {
+    return {{"backend", info.backend}, {"backend_device_id", info.stable_id}, {"requested_channels", info.requested_channels},
+            {"client_channels", info.channels}, {"client_sample_rate", info.sample_rate},
+            {"client_format", "f32"}, {"client_channel_map", info.client_channel_map},
+            {"internal_channels", info.internal_channels},
+            {"internal_sample_rate", info.internal_sample_rate},
+            {"internal_format", ma_get_format_name(info.internal_format)},
+            {"internal_channel_map", info.internal_channel_map}};
+}
+
+template<class Bank>
+nlohmann::json build_meter_json(const Bank& meters, unsigned channels) {
     nlohmann::json arr = nlohmann::json::array();
-    unsigned count = std::min(channels, CM5_MAX_CHANNELS);
+    unsigned count = std::min<unsigned>(channels, meters.size());
     for (unsigned i = 0; i < count; ++i) {
         const auto& m = meters[i];
         nlohmann::json mj;
@@ -223,7 +240,7 @@ void WebClientSession::set_identity(const std::string& key, const std::string& n
 
 void WebClientSession::start_sender(const std::shared_ptr<ix::WebSocket>& socket) {
     // Allocate before launching; allocation failure must not terminate a worker.
-    std::vector<uint8_t> block(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS * sizeof(float));
+    std::vector<uint8_t> block(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CLIENT_CHANNELS * sizeof(float));
     sender_thread = std::thread([this, socket, block = std::move(block)]() mutable {
         try {
         while (active.load(std::memory_order_acquire)) {
@@ -231,7 +248,7 @@ void WebClientSession::start_sender(const std::shared_ptr<ix::WebSocket>& socket
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
-            const unsigned channels = std::clamp(output_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CHANNELS);
+            const unsigned channels = std::clamp(output_channels.load(std::memory_order_relaxed), 1u, CM5_MAX_CLIENT_CHANNELS);
             const size_t bytes = CM5_MAX_AUDIO_FRAMES * channels * sizeof(float);
             const size_t got = outgoing_rb.read(block.data(), bytes);
             if (got) socket->sendBinary(std::string(reinterpret_cast<char*>(block.data()), got));
@@ -331,6 +348,19 @@ void ClientManager::update_activated_device(const std::string& id, bool active) 
     if (m_dspEngine) m_dspEngine->mark_graph_dirty();
 }
 
+void ClientManager::set_device_channels(const std::string& id, unsigned capture, unsigned playback) {
+    if (capture > CM5_MAX_CHANNELS || playback > CM5_MAX_CHANNELS)
+        throw std::invalid_argument("Device channels exceed application limit");
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    m_deviceChannels[id] = {capture, playback};
+}
+
+std::pair<unsigned, unsigned> ClientManager::device_channels(const std::string& id) const {
+    std::lock_guard<std::recursive_mutex> control(m_control_lock);
+    const auto found = m_deviceChannels.find(id);
+    return found == m_deviceChannels.end() ? std::pair<unsigned, unsigned>{0, 0} : found->second;
+}
+
 std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, const std::string& remoteIp) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     std::lock_guard<std::mutex> lock(m_lock);
@@ -338,10 +368,10 @@ std::shared_ptr<WebClientSession> ClientManager::create_session(uint32_t id, con
     session->id = id;
     session->remote_ip = remoteIp;
     session->set_identity("connection-" + std::to_string(id), "Client " + std::to_string(id));
-    session->io_buffer.resize(CM5_BUFFER_FRAMES * CM5_MAX_CHANNELS);
-    session->input_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
-    session->output_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
-    session->packet_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CHANNELS);
+    session->io_buffer.resize(CM5_BUFFER_FRAMES * CM5_MAX_CLIENT_CHANNELS);
+    session->input_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CLIENT_CHANNELS);
+    session->output_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CLIENT_CHANNELS);
+    session->packet_block.resize(CM5_MAX_AUDIO_FRAMES * CM5_MAX_CLIENT_CHANNELS);
     session->active.store(true, std::memory_order_relaxed);
     m_sessions.push_back(session);
     return session;
@@ -429,11 +459,20 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     std::string epId = item["endpoint"];
                     auto& bank = (std::string(type) == "capture") ? controls.capture[epId] : controls.playback[epId];
                     unsigned ch = item.value("channel", 0u);
-                    if (ch < CM5_MAX_CHANNELS) {
+                    if (ch < CM5_MAX_CONTROL_CHANNELS) {
                         bank[ch].gain.store(std::clamp(item.value("gain", 1.0f), 0.0f, 8.0f), std::memory_order_relaxed);
                         bank[ch].mute.store(item.value("mute", false), std::memory_order_relaxed);
                     }
                 }
+            }
+        }
+        m_deviceChannels.clear();
+        if (settings.contains("device_streams") && settings["device_streams"].is_object()) {
+            for (const auto& entry : settings["device_streams"].items()) {
+                const auto capture = entry.value().value("capture_channels", 0u);
+                const auto playback = entry.value().value("playback_channels", 0u);
+                if (capture <= CM5_MAX_CHANNELS && playback <= CM5_MAX_CHANNELS)
+                    m_deviceChannels[entry.key()] = {capture, playback};
             }
         }
         {
@@ -444,7 +483,12 @@ bool ClientManager::load_settings(AudioControls& controls, ToneControls& tone) {
                     if (id_val.is_string()) {
                         std::string id = id_val.get<std::string>();
                         m_activatedDevices.push_back(id);
-                        if (m_deviceManager) m_deviceManager->activate_device(id);
+                        if (m_deviceManager) {
+                            const auto channels = device_channels(id);
+                            std::string error;
+                            if (!m_deviceManager->activate_device(id, channels.first, channels.second, &error))
+                                std::cerr << "[Device] Restore failed for " << id << ": " << error << std::endl;
+                        }
                         register_node("hardware/" + id + "/capture");
                         register_node("hardware/" + id + "/playback");
                     }
@@ -536,6 +580,10 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     std::string temporaryPath;
     nlohmann::json settings;
     settings["version"] = 1;
+    settings["device_streams"] = nlohmann::json::object();
+    for (const auto& entry : m_deviceChannels)
+        settings["device_streams"][entry.first] = {{"capture_channels", entry.second.first},
+                                                  {"playback_channels", entry.second.second}};
     if (m_dspEngine) settings["global_dsp"] = {
         {"gain", m_dspEngine->get_gain_processor()->get_gain()},
         {"threshold", m_dspEngine->get_compressor()->get_threshold()},
@@ -547,7 +595,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     };
     settings["hardware"]["capture"] = nlohmann::json::array();
     for (auto const& [id, bank] : controls.capture) {
-        for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+        for (unsigned i = 0; i < CM5_MAX_CONTROL_CHANNELS; ++i) {
             settings["hardware"]["capture"].push_back({
                 {"endpoint", id}, {"channel", i},
                 {"gain", bank[i].gain.load(std::memory_order_relaxed)},
@@ -557,7 +605,7 @@ bool ClientManager::save_settings(const AudioControls& controls, const ToneContr
     }
     settings["hardware"]["playback"] = nlohmann::json::array();
     for (auto const& [id, bank] : controls.playback) {
-        for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+        for (unsigned i = 0; i < CM5_MAX_CONTROL_CHANNELS; ++i) {
             settings["hardware"]["playback"].push_back({
                 {"endpoint", id}, {"channel", i},
                 {"gain", bank[i].gain.load(std::memory_order_relaxed)},
@@ -673,7 +721,7 @@ bool ClientManager::endpoint_exists(const std::string& endpoint, bool source) co
 bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::string& error) {
     std::lock_guard<std::recursive_mutex> control(m_control_lock);
     if (route.source_channel >= CM5_MAX_CHANNELS || route.destination_channel >= CM5_MAX_CHANNELS) {
-        error = "channel must be between 0 and 7"; return false;
+        error = "channel index exceeds the application channel limit"; return false;
     }
     if (!std::isfinite(route.gain) || route.gain < 0.0f || route.gain > 8.0f) {
         error = "gain must be finite and between 0 and 8"; return false;
@@ -681,6 +729,30 @@ bool ClientManager::add_route(AudioRoute route, uint32_t& assignedId, std::strin
     if (route.source_node < 0 || route.destination_node < 0 ||
         route.source_node >= 256 || route.destination_node >= 256) {
         error = "source or destination endpoint is invalid or unregistered"; return false;
+    }
+    // Validate known live widths without guessing a width for disconnected
+    // endpoints. Saved/offline routes retain identity and are revalidated by DSP
+    // when an endpoint reconnects with a different layout.
+    const auto source = get_endpoint_from_id(route.source_node);
+    const auto destination = get_endpoint_from_id(route.destination_node);
+    if (source.empty() || destination.empty()) { error = "unregistered endpoint"; return false; }
+    auto check = [&](const std::string& endpoint, unsigned channel, bool isSource) {
+        if (endpoint == "tone/generator") return isSource && channel == 0;
+        if (m_deviceManager) for (const auto& dev : m_deviceManager->get_active_devices()) {
+            const auto id = "hardware/" + dev->get_original_id() +
+                            (dev->get_info().is_capture ? "/capture" : "/playback");
+            if (endpoint == id) return isSource == dev->get_info().is_capture && channel < dev->get_info().channels;
+        }
+        for (const auto& session : get_active_sessions()) {
+            const auto base = "client/" + session->get_client_key();
+            if (endpoint == base + "/capture") return isSource && channel < session->input_channels.load();
+            if (endpoint == base + "/playback") return !isSource && channel < session->output_channels.load();
+        }
+        return true; // Offline or internal virtual endpoint, bounded above.
+    };
+    if (!check(source, route.source_channel, true) || !check(destination, route.destination_channel, false)) {
+        error = "channel index or direction is invalid for the endpoint's active layout";
+        return false;
     }
     std::lock_guard<std::mutex> routeLock(m_route_lock);
     std::lock_guard<std::mutex> sessionLock(m_lock);
@@ -844,49 +916,96 @@ bool WebServer::start() {
             nlohmann::json j;
             j["capture"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.capture) {
-                j["capture"][id] = build_meter_json(meters_array, CM5_MAX_CHANNELS);
+                j["capture"][id] = build_meter_json(meters_array, meters_array.size());
             }
             j["playback"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.playback) {
-                j["playback"][id] = build_meter_json(meters_array, CM5_MAX_CHANNELS);
+                j["playback"][id] = build_meter_json(meters_array, meters_array.size());
             }
             response.set_content(j.dump(2), "application/json");
         };
         m_httpServer->Get("/api/devices", [this](const httplib::Request&, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
             m_deviceMgr.enumerate_devices();
             const auto devices = m_deviceMgr.get_available_devices();
-            nlohmann::json j = nlohmann::json::array();
-            for (const auto& d : devices) {
-                nlohmann::json dev_obj;
-                dev_obj["id"] = d.id.alsa;
-                dev_obj["name"] = d.name;
-                dev_obj["is_capture"] = d.is_capture;
-                dev_obj["channels"] = d.channels;
-                dev_obj["sample_rate"] = d.sample_rate;
-                j.push_back(dev_obj);
+            const auto active = m_deviceMgr.get_active_devices();
+            nlohmann::json result = nlohmann::json::array();
+            for (const auto& device : devices) {
+                const auto selected = m_clientMgr.device_channels(device.stable_id);
+                nlohmann::json item = {{"id", device.stable_id}, {"name", device.name},
+                    {"is_capture", device.is_capture}, {"backend", device.backend},
+                    {"channels", 0}, {"sample_rate", 48000}, {"active", false},
+                    {"capture_channels", selected.first}, {"playback_channels", selected.second},
+                    {"max_channels", CM5_MAX_CHANNELS}};
+                for (const auto& endpoint : active) {
+                    if (endpoint->get_original_id() != device.stable_id ||
+                        endpoint->get_info().is_capture != device.is_capture) continue;
+                    item["active"] = true;
+                    item["channels"] = endpoint->get_info().channels;
+                    item["layout"] = stream_layout_json(endpoint->get_info());
+                }
+                result.push_back(std::move(item));
             }
-            response.set_content(j.dump(2), "application/json");
+            response.set_content(result.dump(2), "application/json");
+        });
+
+        // Explicit probing only: miniaudio warns that detailed info may open a
+        // device. Never probe during enumeration or periodic dashboard refresh.
+        m_httpServer->Get("/api/devices/capabilities", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard<std::recursive_mutex> control(m_clientMgr.control_mutex());
+            if (!request.has_param("id")) { dsp_error(response, 400, "id is required"); return; }
+            try {
+                std::string error;
+                const auto formats = m_deviceMgr.get_device_capabilities(request.get_param_value("id"),
+                    query_bool(request, "is_capture", false), &error);
+                if (!error.empty()) { dsp_error(response, 400, error); return; }
+                nlohmann::json tuples = nlohmann::json::array();
+                for (const auto& format : formats)
+                    tuples.push_back({{"format", ma_get_format_name(format.format)},
+                        {"channels", format.channels}, {"sample_rate", format.sample_rate}, {"flags", format.flags}});
+                response.set_content(nlohmann::json({{"id", request.get_param_value("id")},
+                    {"is_capture", query_bool(request, "is_capture", false)}, {"native_formats", tuples},
+                    {"note", "Reported tuples may contain wildcards and may be incomplete; opening validates the selection. OS profiles remain externally managed."}}).dump(2), "application/json");
+            } catch (const std::exception& error) { dsp_error(response, 400, error.what()); }
         });
 
         post("/api/devices/activate", [this](const httplib::Request& request, httplib::Response& response) {
             const std::string id = request.has_param("id") ? request.get_param_value("id") : "";
-            if (id.empty()) {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"id parameter is required\"}", "application/json");
-                return;
+            if (id.empty()) { dsp_error(response, 400, "id parameter is required"); return; }
+            auto selected = m_clientMgr.device_channels(id);
+            if (request.has_param("capture_channels")) selected.first = query_uint(request, "capture_channels", CM5_MAX_CHANNELS + 1);
+            if (request.has_param("playback_channels")) selected.second = query_uint(request, "playback_channels", CM5_MAX_CHANNELS + 1);
+            if (selected.first > CM5_MAX_CHANNELS || selected.second > CM5_MAX_CHANNELS) {
+                dsp_error(response, 400, "channels must be 0 (automatic) or 1..254"); return;
+            }
+            for (const auto& endpoint : m_deviceMgr.get_active_devices()) {
+                if (endpoint->get_original_id() != id) continue;
+                const auto& info = endpoint->get_info();
+                const auto field = info.is_capture ? "capture_channels" : "playback_channels";
+                const auto requested = info.is_capture ? selected.first : selected.second;
+                if (request.has_param(field) && requested != info.requested_channels) {
+                    dsp_error(response, 400, "Deactivate the device before changing its channel selection (including automatic mode)");
+                    return;
+                }
             }
             if (m_clientMgr.register_node("hardware/" + id + "/capture") == NODE_INVALID ||
                 m_clientMgr.register_node("hardware/" + id + "/playback") == NODE_INVALID) {
-                dsp_error(response, 400, "Endpoint node capacity exhausted");
-                return;
+                dsp_error(response, 400, "Endpoint node capacity exhausted"); return;
             }
-            if (m_deviceMgr.activate_device(id)) {
+            std::string error;
+            if (m_deviceMgr.activate_device(id, selected.first, selected.second, &error)) {
+                m_clientMgr.set_device_channels(id, selected.first, selected.second);
                 m_clientMgr.update_activated_device(id, true);
-                response.set_content("{\"status\":\"ok\"}", "application/json");
-            } else {
-                response.status = 400;
-                response.set_content("{\"status\":\"error\",\"message\":\"failed to activate device\"}", "application/json");
-            }
+                nlohmann::json result = {{"status", "ok"}};
+                nlohmann::json directions = nlohmann::json::array();
+                for (const auto& endpoint : m_deviceMgr.get_active_devices()) {
+                    if (endpoint->get_original_id() == id)
+                        directions.push_back(endpoint->get_info().is_capture ? "capture" : "playback");
+                }
+                result["active_directions"] = directions;
+                if (!error.empty()) result["warning"] = error;
+                response.set_content(result.dump(), "application/json");
+            } else { dsp_error(response, 400, error.empty() ? "failed to activate device" : error); }
         });
 
         post("/api/devices/deactivate", [this](const httplib::Request& request, httplib::Response& response) {
@@ -909,7 +1028,7 @@ bool WebServer::start() {
             j["capture"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.capture) {
                 nlohmann::json arr = nlohmann::json::array();
-                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                for (unsigned i = 0; i < meters_array.size(); ++i) {
                     const auto& meter = meters_array[i];
                     arr.push_back({{"ch", i}, {"value", meter.raw_value.load(std::memory_order_relaxed)}, {"peak", meter.raw_peak.load(std::memory_order_relaxed)}});
                 }
@@ -918,7 +1037,7 @@ bool WebServer::start() {
             j["playback"] = nlohmann::json::object();
             for (auto const& [id, meters_array] : m_metrics.playback) {
                 nlohmann::json arr = nlohmann::json::array();
-                for (unsigned i = 0; i < CM5_MAX_CHANNELS; ++i) {
+                for (unsigned i = 0; i < meters_array.size(); ++i) {
                     const auto& meter = meters_array[i];
                     arr.push_back({{"ch", i}, {"value", meter.raw_value.load(std::memory_order_relaxed)}, {"peak", meter.raw_peak.load(std::memory_order_relaxed)}});
                 }
@@ -1025,17 +1144,19 @@ bool WebServer::start() {
                     std::string epId = "hardware/" + id + "/capture";
                     nlohmann::json ep;
                     ep["id"] = epId; ep["direction"] = "source"; ep["channels"] = dev->get_info().channels; ep["name"] = name;
+                    ep["layout"] = stream_layout_json(dev->get_info());
                     endpointsMap[epId] = ep;
                 } else {
                     std::string epId = "hardware/" + id + "/playback";
                     nlohmann::json ep;
                     ep["id"] = epId; ep["direction"] = "destination"; ep["channels"] = dev->get_info().channels; ep["name"] = name;
+                    ep["layout"] = stream_layout_json(dev->get_info());
                     endpointsMap[epId] = ep;
                 }
             }
             
             nlohmann::json toneEp;
-            toneEp["id"] = "tone/generator"; toneEp["direction"] = "source"; toneEp["channels"] = 8;
+            toneEp["id"] = "tone/generator"; toneEp["direction"] = "source"; toneEp["channels"] = 1;
             endpointsMap["tone/generator"] = toneEp;
             
             const auto sessions = m_clientMgr.get_active_sessions();
@@ -1101,8 +1222,8 @@ bool WebServer::start() {
             std::string dst_ep = request.has_param("destination_node") ? request.get_param_value("destination_node") : "";
             route.source_node = m_clientMgr.get_node_id(src_ep);
             route.destination_node = m_clientMgr.get_node_id(dst_ep);
-            route.source_channel = query_uint(request, "source_channel", 99);
-            route.destination_channel = query_uint(request, "destination_channel", 99);
+            route.source_channel = query_uint(request, "source_channel", CM5_MAX_CHANNELS);
+            route.destination_channel = query_uint(request, "destination_channel", CM5_MAX_CHANNELS);
             route.gain = query_float(request, "gain", 1.0f);
             route.enabled = query_bool(request, "enabled", true);
             uint32_t id = 0; std::string error;
@@ -1240,10 +1361,13 @@ bool WebServer::start() {
                     const std::string endpoint = request.has_param("endpoint") ? request.get_param_value("endpoint") : "";
                     const std::string type = request.has_param("type") ? request.get_param_value("type") : "";
                     const int channel = request.has_param("ch") ? std::stoi(request.get_param_value("ch")) : -1;
-                    if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= 8) throw std::invalid_argument("invalid parameters");
-                    auto& bank = (type == "playback") ? m_metrics.playback[endpoint] : m_metrics.capture[endpoint];
-                    bank[channel].clipped.store(false);
-                    bank[channel].peak_hold_db.store(-60.0f);
+                    if (endpoint.empty() || (type != "capture" && type != "playback") || channel < 0 || channel >= static_cast<int>(CM5_MAX_CHANNELS)) throw std::invalid_argument("invalid parameters");
+                    auto& banks = (type == "playback") ? m_metrics.playback : m_metrics.capture;
+                    const auto found = banks.find(endpoint);
+                    if (found == banks.end() || static_cast<size_t>(channel) >= found->second.size())
+                        throw std::invalid_argument("endpoint or channel has no meter bank");
+                    found->second[channel].clipped.store(false);
+                    found->second[channel].peak_hold_db.store(-60.0f);
                 }
                 response.set_content("{\"status\":\"ok\"}", "application/json");
             } catch (const std::exception& error) {
@@ -1304,8 +1428,8 @@ bool WebServer::start() {
                     std::string key, name;
                     unsigned input = session->input_channels.load(), output = session->output_channels.load();
                     if (!parse_identity_message(message->str, key, name, input, output)) return;
-                    const unsigned finalIn = std::clamp(input, 1u, CM5_MAX_CHANNELS);
-                    const unsigned finalOut = std::clamp(output, 1u, CM5_MAX_CHANNELS);
+                    const unsigned finalIn = std::clamp(input, 1u, CM5_MAX_CLIENT_CHANNELS);
+                    const unsigned finalOut = std::clamp(output, 1u, CM5_MAX_CLIENT_CHANNELS);
                     std::unique_lock<std::recursive_mutex> control(m_clientMgr.control_mutex());
                     if (session->media_ready.load()) {
                         // Live resizing/renaming races ring-buffer users. Reconnect

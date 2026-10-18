@@ -18,12 +18,35 @@
 // Forward declaration of NodeId from web_server.h
 using NodeId = int32_t;
 
+// A native capability is a JOINT tuple, not four independent maxima. Unknown
+// format / zero channels / zero sample_rate retain miniaudio's wildcard meaning.
+struct NativeStreamFormat {
+    ma_format format = ma_format_unknown;
+    unsigned channels = 0;
+    unsigned sample_rate = 0;
+    unsigned flags = 0;
+};
+
 struct AudioDeviceInfo {
     ma_device_id id{};
     std::string name;
     bool is_capture = false;
     unsigned channels = 0;
     unsigned sample_rate = 0;
+    // Stable within the selected backend. ALSA and Pulse keep their raw IDs;
+    // JACK uses "jack:0". The null test backend retains the legacy empty ID.
+    std::string stable_id;
+    std::string backend;
+    std::vector<NativeStreamFormat> native_formats; // Only populated by an explicit query.
+    unsigned requested_channels = 0; // Zero = backend-native/auto, NOT a maximum.
+    // channels/sample_rate above describe the opened f32/48 kHz CLIENT stream.
+    // Enumeration leaves them unknown (zero). Internal means backend stream,
+    // not a promise about physical ports behind a server or an ALSA plugin.
+    unsigned internal_channels = 0;
+    unsigned internal_sample_rate = 0;
+    ma_format internal_format = ma_format_unknown;
+    std::vector<unsigned> client_channel_map;
+    std::vector<unsigned> internal_channel_map;
 };
 
 class HardwareDevice {
@@ -38,6 +61,7 @@ public:
     void stop();
 
     const AudioDeviceInfo& get_info() const { return m_info; }
+    const std::string& last_error() const { return m_last_error; }
     PcmRingBuffer& get_input_buffer() { return m_input_rb; }
     PcmRingBuffer& get_output_buffer() { return m_output_rb; }
     const std::string& get_original_id() const { return m_originalId; }
@@ -59,6 +83,8 @@ private:
     PcmRingBuffer m_input_rb;
     PcmRingBuffer m_output_rb;
     std::string m_originalId;
+    unsigned m_requested_channels = 0;
+    std::string m_last_error;
 };
 
 class DeviceManager {
@@ -71,7 +97,15 @@ public:
     void enumerate_devices();
     std::vector<AudioDeviceInfo> get_available_devices();
     std::vector<std::shared_ptr<HardwareDevice>> get_active_devices();
-    bool activate_device(const std::string& id);
+    // Queries ONLY this enumerated endpoint; may temporarily open it to probe.
+    // An empty result is not a maximum or evidence that no channels exist.
+    std::vector<NativeStreamFormat> get_device_capabilities(
+        const std::string& id, bool capture, std::string* error = nullptr);
+    // Existing one-argument callers retain auto selection. A nonzero request
+    // must match the backend stream width; no channel up/downmix is accepted.
+    // An active endpoint is never reconfigured: deactivate before changing width.
+    bool activate_device(const std::string& id, unsigned captureChannels = 0,
+                         unsigned playbackChannels = 0, std::string* error = nullptr);
     void deactivate_device(const std::string& id);
     void stop_all();
 

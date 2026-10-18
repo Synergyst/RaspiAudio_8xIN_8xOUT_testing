@@ -91,7 +91,7 @@ struct BackendProbe {
 };
 
 AudioDeviceInfo null_info(bool capture, unsigned channels = 2) {
-    assert(channels > 0 && channels <= 8);
+    assert(channels > 0 && channels <= CM5_MAX_CHANNELS);
     AudioDeviceInfo info{}; // nullbackend == 0 is the only valid null device ID.
     info.name = capture ? "Synthetic null capture" : "Synthetic null playback";
     info.is_capture = capture;
@@ -266,8 +266,8 @@ void activation_and_exact_ids() {
     BackendProbe probe;
     DeviceManager manager(false);
     prepare(manager, probe);
-    // The manager currently compares id.alsa for every backend. For a valid null
-    // ID this string is empty. Exercise real public activation using that ID.
+    // The null test backend preserves its legacy empty ID. Other backends use
+    // their own ID representation, not an unconditional read of id.alsa.
     assert(manager.activate_device(""));
     auto active = manager.get_active_devices();
     assert(active.size() == 2);
@@ -327,6 +327,57 @@ void activation_and_exact_ids() {
     assert(probe.deviceUninits == 6);
 }
 
+void multichannel_negotiation() {
+    DeviceManager manager(false);
+    DeviceManagerTestAccess::initialize_null(manager, nullptr);
+    DeviceManagerTestAccess::available(manager, {null_info(true), null_info(false)});
+    std::string error;
+    assert(!manager.activate_device("", CM5_MAX_CHANNELS + 1, 0, &error));
+    assert(!error.empty() && manager.get_active_devices().empty());
+    assert(manager.activate_device("", 12, 32, &error));
+    assert(error.empty());
+    for (const auto& device : manager.get_active_devices()) {
+        const auto& info = device->get_info();
+        assert(info.channels == (info.is_capture ? 12u : 32u));
+        assert(info.requested_channels == info.channels);
+        assert(info.internal_channels == info.channels);
+        assert(info.sample_rate == 48000 && info.internal_sample_rate == 48000);
+        assert(info.client_channel_map == info.internal_channel_map);
+    }
+    const auto owners = manager.get_active_devices();
+    assert(!manager.activate_device("", 16, 32, &error));
+    assert(error.find("deactivate") != std::string::npos);
+    assert(manager.get_active_devices().size() == owners.size());
+    manager.deactivate_device("");
+}
+
+void reject_converted_channel_width() {
+    DeviceManager manager(false);
+    DeviceManagerTestAccess::initialize_null(manager, nullptr);
+    auto& context = DeviceManagerTestAccess::context(manager);
+    const auto original = context.callbacks.onDeviceInit;
+    // Real null-backend initialization, but model a backend that can only open
+    // stereo despite receiving an eight-channel CLIENT request.
+    context.callbacks.onDeviceInit = [](ma_device* device, const ma_device_config* config,
+                                       ma_device_descriptor* playback, ma_device_descriptor* capture) -> ma_result {
+        auto adjusted = *config;
+        adjusted.playback.channels = 2;
+        // Use the real callback saved in pUserData, without touching host audio.
+        auto callback = *static_cast<decltype(original)*>(device->pContext->pUserData);
+        const auto result = callback(device, &adjusted, playback, capture);
+        if (result == MA_SUCCESS && playback) playback->channels = 2;
+        return result;
+    };
+    // The local function pointer remains alive until every device is uninitialized.
+    auto savedCallback = original;
+    context.pUserData = &savedCallback;
+    HardwareDevice device(null_info(false, 8), &context, "stereo-only");
+    assert(!device.init());
+    assert(!HardwareDeviceTestAccess::initialized(device));
+    assert(device.last_error().find("refusing channel remix") != std::string::npos);
+    assert(!device.get_input_buffer().initialized && !device.get_output_buffer().initialized);
+}
+
 void stop_all_retains_external_owners() {
     BackendProbe probe;
     {
@@ -367,5 +418,7 @@ int main() {
     uninit_wakes_blocked_data_loop();
     activation_and_exact_ids();
     stop_all_retains_external_owners();
+    multichannel_negotiation();
+    reject_converted_channel_width();
     std::cout << "device lifecycle tests passed (null backend only)\n";
 }

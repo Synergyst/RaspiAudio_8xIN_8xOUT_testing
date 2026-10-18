@@ -19,7 +19,7 @@ using namespace std::chrono_literals;
 struct DspEngineTestAccess {
     static void block(DspEngine& engine) { engine.process_audio(); }
     static float sample(DspEngine& engine, NodeId node, size_t frame = 0) {
-        return engine.get_buffer(node)[frame * CM5_INTERNAL_WIDTH];
+        return engine.get_buffer(node)[frame * engine.m_nodeWidths[node]];
     }
     static void hook(DspEngine& engine, std::function<void()> hook) {
         assert(!engine.is_running());
@@ -163,6 +163,22 @@ void persistence_and_http(const std::filesystem::path& path) {
         WebServer server(rig.metrics, rig.controls, rig.tone, rig.clients, rig.devices, *rig.engine, 28184, 28185, true);
         assert(server.start());
         httplib::Client http("127.0.0.1", 28184); http.set_read_timeout(4);
+        // Dynamic meter API widths and bounds: no eight-channel truncation and
+        // no out-of-bounds indexing on a missing or too-short meter bank.
+        {
+            std::lock_guard<std::mutex> lock(rig.metrics.lock);
+            rig.metrics.playback["synthetic/wide"] = std::vector<ChannelMeter>(32);
+            rig.metrics.playback["synthetic/wide"][31].raw_peak.store(0.25f);
+        }
+        auto wideMeters = response(http.Get("/api/meters"));
+        assert(wideMeters["playback"]["synthetic/wide"].size() == 32);
+        assert(response(http.Get("/api/raw"))["playback"]["synthetic/wide"][31]["peak"] == 0.25f);
+        response(http.Post("/api/reset_clips?endpoint=synthetic%2Fwide&type=playback&ch=31", "", "application/json"));
+        response(http.Post("/api/reset_clips?endpoint=synthetic%2Fwide&type=playback&ch=32", "", "application/json"), 400);
+        response(http.Post("/api/reset_clips?endpoint=missing&type=playback&ch=0", "", "application/json"), 400);
+        response(http.Post("/api/devices/activate?id=missing&capture_channels=255", "", "application/json"), 400);
+        response(http.Post("/api/devices/activate?id=missing&capture_channels=-1", "", "application/json"), 400);
+        rig.clients.set_device_channels("offline-card", 12, 32);
         const auto created = response(http.Post("/api/routes?source_node=tone%2Fgenerator&destination_node=client%2Foffline%2Fsink%2Fplayback&source_channel=0&destination_channel=0", "", "application/json"));
         assert(created["adopted"] == true);
         const std::string id = created["id"];
@@ -218,6 +234,7 @@ void persistence_and_http(const std::filesystem::path& path) {
         Rig fresh;
         assert(fresh.clients.load_settings(fresh.controls, fresh.tone));
         assert(fresh.clients.get_routes().size() == 1);
+        assert((fresh.clients.device_channels("offline-card") == std::pair<unsigned, unsigned>{12, 32}));
         const auto restored = fresh.clients.get_routes()[0];
         assert(fresh.clients.get_endpoint_from_id(restored.destination_node) == "client/offline/sink/playback");
         assert(fresh.engine->get_gain_processor()->get_gain() == 0.7f);

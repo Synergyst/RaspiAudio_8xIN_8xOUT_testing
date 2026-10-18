@@ -49,7 +49,7 @@ The project combines a C++17 audio engine, miniaudio device access, an HTTP(S) c
 
 ### Important distinctions
 
-- **Device-agnostic does not mean unlimited compatibility.** The current routing width is eight channels; not every backend/device combination has been validated. See [Backend selection](#backend-selection-and-device-compatibility).
+- **Device-agnostic does not mean unlimited compatibility.** Hardware/graph endpoints support variable widths up to the vendored miniaudio bound (254); not every backend/device combination has been validated. See [Backend selection](#backend-selection-and-device-compatibility).
 - **Capture is a source; playback is a destination**, from the patchbay's perspective. A USB microphone need not have a playback endpoint, and an output-only DAC need not have capture.
 - There is **no automatic input-N-to-output-N connection**. Create the routes you want.
 - The plugin system is a **compiled-in C++ registry**, not a VST/LV2 host, plugin-directory scanner, or runtime shared-library loader.
@@ -63,8 +63,8 @@ The project combines a C++17 audio engine, miniaudio device access, an HTTP(S) c
 | Language | C++17 |
 | Internal sample format | Interleaved 32-bit float PCM |
 | Engine sample rate | 48,000 Hz |
-| Internal node width | 8 channels (`CM5_INTERNAL_WIDTH`) |
-| Channel indices in APIs | Zero-based, `0..7`; dashboard labels are `CH1..CH8` |
+| Internal node width | Per-endpoint variable stride, 1..254 channels |
+| Channel indices in APIs | Zero-based, bounded by endpoint width and `0..253`; dashboard labels start at `CH1` |
 | Engine processing block | **64 frames**, nominally **1.333 ms** at 48 kHz |
 | Worker wake interval | Calculated from block/rate; integer-microsecond interval is currently 1,333 µs |
 | Requested hardware period | 64 frames; backend may negotiate a larger actual period/buffer |
@@ -78,7 +78,7 @@ These are implementation values, not latency guarantees. The 64-frame block is t
 
 Hardware sample formats may differ from float32; miniaudio converts as needed. The application requests a 48 kHz client-facing device stream. The sample rate reported by device enumeration is capability metadata, not proof of the currently opened hardware format.
 
-The current build is not an arbitrary-width engine. Devices with more than eight channels are not fully supported by the routing graph; do not assume all their channels become routable. Endpoint-to-node IDs survive disconnect/deactivation and are reused for the **same endpoint identity**, not recycled for unrelated identities. New node registration returns `NODE_INVALID` when the 255 non-tone slots are exhausted. A client normally needs two slots (capture/playback). Cycling through new client IDs can exhaust capacity; this is not an unlimited/recycling endpoint pool. Route IDs also increase without reuse; DSP is available only for IDs `1..1023`, even if earlier routes have been deleted.
+The hardware sample path uses each opened stream's actual channel width, including more than eight channels, within the explicit 254-channel miniaudio/application limit. This is not unlimited or universal hardware support. Graph audio backing storage is allocated before DSP starts: three banks × 256 nodes × 64 frames × 254 float samples (about 48 MiB), with only each node's active width processed. Network clients retain a separately bounded 1..8-channel protocol. Endpoint-to-node IDs survive disconnect/deactivation and are reused for the **same endpoint identity**, not recycled for unrelated identities. New node registration returns `NODE_INVALID` when the 255 non-tone slots are exhausted. A client normally needs two slots (capture/playback). Cycling through new client IDs can exhaust capacity; this is not an unlimited/recycling endpoint pool. Route IDs also increase without reuse; DSP is available only for IDs `1..1023`, even if earlier routes have been deleted.
 
 ## Backend selection and device compatibility
 
@@ -101,13 +101,83 @@ The intended scope is general Linux audio devices, not a specific sound card. Mu
 - The selected backend and its running server, permissions, and device visibility.
 - Ability to open a stream compatible with the application's requested format/rate.
 - Channel enumeration and mapping, including backend-provided conversions.
-- Current eight-channel routing width and remaining lifecycle/clock handling limitations.
+- Valid stream/channel layout selection and remaining lifecycle/clock handling limitations.
 
-The current device layer retains Linux/ALSA-specific assumptions: ID serialization uses the `ma_device_id.alsa` union member and some device-name heuristics force eight channels. Virtual ALSA-name filtering and the `plughw` activation fallback are now restricted to the ALSA backend; the fallback is not attempted on JACK/PulseAudio. Prior PulseAudio operation is not comprehensive backend validation, and adding JACK to the candidate list is **not** comprehensive JACK integration. Backend-independent opaque IDs and physical device/channel testing remain hardening work.
+Device identities are serialized using the selected backend's ID representation: existing ALSA/PulseAudio name IDs stay compatible; JACK uses `jack:0`. Name-based eight-channel overrides and maximum-channel guessing are removed. Virtual ALSA-name filtering and the `plughw` activation fallback remain ALSA-only. Backend stream layouts and physical connector identities still require real-device validation. A server's endpoint is not necessarily an independent physical device; PulseAudio/PipeWire profiles and JACK port connections remain externally managed.
 
 PipeWire is not a separate candidate in this list. It may provide a PulseAudio- or JACK-compatible server, in which case the selected backend name remains PulseAudio or JACK. Device visibility can differ from `aplay -l`/`arecord -l`, which inspect ALSA rather than the chosen sound server.
 
 There is no backend-selection command-line flag. Change the constructor's list/order if a different preference is required; changing a running sound server or `/etc` configuration is not necessary for ordinary plugin development. `DeviceManager(false)` and the application's **`--no-audio`** mode bypass context initialization entirely: no JACK, PulseAudio, ALSA, or miniaudio null backend is initialized, enumeration returns no hardware, and hardware activation fails. Tone, client routing, DSP, HTTP, and WS can still run for isolated checks.
+
+### Channel-width regression coverage
+
+**Verification for this change:** the application build, channel-width test,
+C++ reliability/API/persistence test, null-device lifecycle/negotiation test,
+native plugin test and mocked dashboard test passed. The process-level shutdown
+suite also passed (21 graceful exits; slowest approximately 1.015 seconds). This
+is synthetic/null/backend-disabled evidence; no physical hardware or visual browser
+qualification was performed. Working runtime settings and system audio configuration
+were not changed.
+
+`make test-channels` runs deterministic synthetic hardware callback → PCM ring →
+engine routing/DSP → playback ring → hardware callback checks at widths
+**1, 2, 3, 6, 8, 12, 16, 24, 32, and 254**. It checks frame/channel identity,
+reverse mapping, unequal-width fan-out/summing, actual meter widths/values,
+partial capture and playback silence, out-of-range/direction rejection, high-index
+save/restore, and same-identity reopen at a narrower/wider width. These callbacks
+are manually driven; no backend or physical device is opened. The null lifecycle
+tests additionally open actual null streams at unequal widths and simulate a
+backend accepting an eight-channel client over a stereo internal stream to verify
+that the latter is rejected. They do not certify real connectors or clock drift.
+
+### Hardware stream selection and channel diagnostics
+
+The Hardware Manager groups capture/playback by exact device ID and offers a separate
+channel request for each direction: **0 = backend automatic**, or **1..254** explicit.
+Automatic does not mean maximum. In particular, ALSA may choose stereo for a device
+that also supports a larger mode. Choose that larger width explicitly when desired.
+Counts are stream requests, not OS profile controls. Deactivate before changing an
+active width, then activate with the new request; the rest of the application stays up.
+With explicit counts, paired activation either opens all requested available directions
+or reports an error without publishing newly opened partial directions. Legacy all-auto
+activation may retain one usable direction when the other cannot open; the response
+includes `active_directions` and a `warning`, also shown in the dashboard.
+
+`POST /api/devices/activate` still accepts `id`, with optional query/form
+`capture_channels` and `playback_channels`. Omitted values reuse the saved request,
+or automatic for an unconfigured device. Negative, malformed and >254 requests return
+400. Backend-open failures include their cause. A successful client stream whose
+channel count differs from the backend stream is rejected rather than accepting
+miniaudio channel up/downmix as if independent channels existed. Native sample-format
+conversion and sample-rate conversion to the 48 kHz float32 engine remain supported.
+The existing adoption/autosave completion contract still applies. Requested counts
+are saved in optional `device_streams:{ID:{capture_channels:N,playback_channels:N}}`.
+
+`GET /api/devices` keeps the basic array shape and adds `backend`, `active`,
+`capture_channels`, `playback_channels`, `max_channels`, and (when opened) `layout`.
+`/api/graph` hardware endpoints also include `layout`: `requested_channels`,
+`client_channels`, `client_sample_rate`, `client_format`, `client_channel_map`,
+`internal_channels`, `internal_sample_rate`, `internal_format`, `internal_channel_map`,
+`backend`, and `backend_device_id` (the actual opened/fallback ID). Maps contain
+miniaudio channel-position IDs, not connector labels.
+Backend/internal describes the opened backend stream—not physical ports hidden behind
+an audio server or an ALSA plugin.
+
+The optional **PROBE CAPABILITIES** button explicitly confirms a potentially
+hardware-opening query. `GET /api/devices/capabilities?id=ID&is_capture=true|false`
+returns `native_formats:[{format,channels,sample_rate,flags}]`. Each entry is a **joint
+tuple**. Unknown format / zero channels / zero rate are wildcards; entries may be
+incomplete or truncated. A maximum from one tuple cannot be combined with a rate
+from another. The actual open validates the request. Routine enumeration does not
+probe every device and never queries detailed info inside miniaudio's enumeration
+callback. This application does not change PulseAudio/PipeWire profiles, JACK server
+configuration or ALSA system configuration.
+
+**RaspiAudio observation remains unverified:** neither these diagnostics nor synthetic
+sample tests certify its physical connector mapping. Use low-amplitude identification
+signals one playback channel at a time, recording all capture channels and both maps.
+Compare channel identity separately from analog gain/crosstalk and timing. No equality
+of playback/capture meter levels is assumed and no pointer-bug diagnosis is asserted.
 
 ## Dependencies and setup
 
@@ -485,28 +555,29 @@ Graph GET exposes real `revision` (the requested/accepted engine revision), `ado
 
 | Method | Endpoint | Parameters / returned data |
 |---|---|---|
-| GET | `/api/devices` | Re-enumerates selected-backend devices; array of `{id,name,is_capture,channels,sample_rate}` |
+| GET | `/api/devices` | Basic enumeration plus saved requests and active stream diagnostics; no detailed hardware probing |
+| GET | `/api/devices/capabilities` | Explicit, potentially device-opening probe; required `id`, optional `is_capture` |
 | POST | `/api/devices/activate` | Required `id`; opens matching capture/playback entries, registers stable nodes, waits for adoption then saves; activation failure 400, adoption pending 503, applied/save-failed 500 |
 | POST | `/api/devices/deactivate` | Required `id`; removes active bindings while preserving logical node IDs/routes, waits for adoption then saves; completion/error fields as above |
 | GET | `/api/clients` | `{clients:[...]}` with session `id`, `client_id`, `name`, `ip`, `input_channels`, `output_channels`, `input_meters`, `output_meters` |
 | GET | `/api/graph` | `{revision,adopted_revision,persisted_revision,endpoints:[...],routes:[...]}`; endpoint IDs/names/directions/channels, connected flags for known clients, route state including `dsp_active` |
 
-`revision` is now the real changing engine requested revision, not the old hardcoded 1; adoption and persistence can lag it. Tone has no explicit `name` field in the graph; clients should tolerate optional endpoint fields. Disconnected known clients are advertised with placeholder counts (1 input/2 output), not persisted negotiated channel counts. Enumeration channel count 0 means unknown/native selection; it does not mean the device has no channels.
+`revision` is now the real changing engine requested revision, not the old hardcoded 1; adoption and persistence can lag it. Tone is mono and has no explicit `name` field in the graph; clients should tolerate optional endpoint fields. Active hardware endpoints include `layout` diagnostics. Disconnected known clients are advertised with placeholder counts (1 input/2 output), not persisted negotiated channel counts. Inactive enumeration channel count 0 means unknown/native selection; it does not mean the device has no channels. Active enumeration reports the opened stream's client width.
 
-Repeated activation succeeds when the matching device is already active instead of requiring a new stream. Device state autosave is serialized after adoption and **does report** failure: 503 if adoption is unconfirmed (no save), or 500 if applied but writing settings failed. A 200 acknowledges both adoption and persistence, not physical listening/channel verification.
+Repeated activation succeeds when the matching device is already active at the requested width. A different explicit width is rejected until deactivation; unrelated endpoints and the whole application need not restart. Device state autosave is serialized after adoption and **does report** failure: 503 if adoption is unconfirmed (no save), or 500 if applied but writing settings failed. A 200 acknowledges both adoption and persistence, not physical listening/channel verification.
 
 ### Routes
 
 | Method | Endpoint | Parameters / behavior |
 |---|---|---|
-| POST | `/api/routes` | `source_node`, `destination_node` **endpoint strings**; `source_channel`, `destination_channel` 0..7; optional `gain` (default 1, finite 0..8), `enabled` (default true) |
+| POST | `/api/routes` | `source_node`, `destination_node` **endpoint strings**; `source_channel`, `destination_channel` 0..253, further bounded by active endpoint width; optional `gain` (default 1, finite 0..8), `enabled` (default true) |
 | POST | `/api/routes/update` | Legacy route-only update: required `id`; `gain` default 1, finite 0..8; `enabled` default true. Missing values reset to defaults, not preserve old values. Failure 400 |
 | POST | `/api/routes/{id}/apply` | **JSON body** `{gain,enabled,dsp}`; whole inspector request validated before route/DSP publication, then engine-adoption acknowledgement; does not save |
 | DELETE | `/api/routes/{id}` | Delete route and cached DSP configuration; 404 if not found |
 
 Route creation returns `status:"ok"`, `id:"X"` plus the shared completion fields: the creation response ID is currently a **string**, while graph/settings route IDs are numbers. Duplicate source-channel/destination-channel connections are rejected with 400. Graph routes use keys `source` and `destination` for endpoint strings, not the POST parameter names `source_node`/`destination_node`.
 
-Route creation rejects invalid/unregistered numeric nodes, out-of-range internal channels, duplicate edges, invalid gain, and exhausted route IDs. Fixed node registration is bounded. This is still **not** full endpoint-capability or graph validation: channels are checked against the internal width, not every endpoint's actual channel count/direction, and enabled cycles are not comprehensively rejected. Prefer known source/destination endpoints from `/api/graph` and avoid cycles. There is no separate `GET /api/routes`; obtain routes through `/api/graph`.
+Route creation rejects invalid/unregistered numeric nodes, indices beyond 0..253, channels/directions outside a known active endpoint's layout, duplicate edges, invalid gain, and exhausted route IDs. Offline/virtual endpoint widths cannot be physically validated; preserved routes are rechecked against actual widths by the graph at reconnect. Fixed node registration is bounded. Enabled cycles are still not comprehensively rejected. Prefer known source/destination endpoints from `/api/graph` and avoid cycles. There is no separate `GET /api/routes`; obtain routes through `/api/graph`.
 
 Endpoint naming:
 
@@ -543,7 +614,7 @@ See [docs/PLUGINS.md](docs/PLUGINS.md) for the full metadata schema and typed co
 | GET | `/api/dsp` | Fixed global hardware-playback `{gain,threshold,ratio}` |
 | POST | `/api/dsp` | Optional finite `gain >= 0`, `threshold >= 0`, `ratio >= 1`; invalid values 400 |
 
-Tone POST uses **`frequency`**, while GET/settings use **`frequency_hz`**. Although the tone graph endpoint advertises eight channels, the current sine generator writes only **channel 0 (CH1)**. Route that channel to any desired outputs.
+Tone POST uses **`frequency`**, while GET/settings use **`frequency_hz`**. The tone graph endpoint advertises one channel and writes **channel 0 (CH1)**. Route that channel to any desired outputs.
 
 Global DSP is separate from per-route plugin chains and is now saved/restored under optional `global_dsp`. Tone and fixed-global POST handlers gather and validate values before storing fields, then use the shared adoption barrier. Numeric query helpers retain permissive legacy parsing: some unparsable text can fall back to the prior/default value rather than fail. Do not infer strict JSON typing or compare-and-swap semantics from these query endpoints. The global Gain/Compressor parameters remain individual atomic controls, not a dynamic registry rack.
 
@@ -558,7 +629,7 @@ Global DSP is separate from per-route plugin chains and is now saved/restored un
 | POST | `/api/reset_clips` | `all=1`, or required `endpoint`, `type`, `ch`; resets `clipped=false`, `peak_hold_db=-60` |
 | POST | `/api/settings/save` | No required body; waits for engine adoption, then serializes accepted applied state. 200 adopted+persisted; 503 pending/no save; 500 applied but save failed |
 
-Meter entries contain `ch`, `raw_value`, `raw_peak`, `rms_db`, `peak_db`, `peak_hold_db`, `clipped`. `raw_value`/`value` is **block RMS**, and `raw_peak`/`peak` is **block absolute peak**, not a stream of individual raw samples. `/api/meters` and `/api/raw` iterate existing metric maps, not a strict active-device snapshot, and emit eight entries per stored endpoint bank. Session meter arrays are also returned by `/api/clients`, but the engine currently updates endpoint metric maps rather than those session arrays; use endpoint maps for engine metering.
+Meter entries contain `ch`, `raw_value`, `raw_peak`, `rms_db`, `peak_db`, `peak_hold_db`, `clipped`. `raw_value`/`value` is **block RMS**, and `raw_peak`/`peak` is **block absolute peak**, not a stream of individual raw samples. `/api/meters` and `/api/raw` iterate existing metric maps, not a strict active-device snapshot, and emit the stored endpoint bank's actual channel count. Reconnection at a new width replaces the bank; old inactive endpoint banks may remain until process restart. Session meter arrays are also returned by `/api/clients`, but the engine currently updates endpoint metric maps rather than those session arrays; use endpoint maps for engine metering.
 
 Peak-hold and clip fields are part of the API, but continuous peak-hold accumulation and latched clipping are not implemented in the current meter update. `clipped` reflects the most recently updated block's peak `> 1.0`. Active hardware/client capture short reads are zero-filled and metered as silence; a disconnected or no-longer-updated endpoint can leave old entries in the metric maps. RESET CLIPS is not a substitute for removing clipping from the signal path.
 
@@ -667,12 +738,12 @@ Save is serialized under the control mutex with snapshot construction and other 
 - Top-level **SAVE** / `POST /api/settings/save` waits for adoption and persists accepted applied state only. No adoption means 503 and **no file write**; an I/O failure after adoption means 500, not a false success or live-state rollback.
 - Device activation/deactivation also saves after adoption, potentially including other already accepted changes; failures are surfaced in the response.
 - Route create/update/delete/APPLY, route DSP, tone, and fixed global controls do not automatically save. Apply first, then SAVE. Browser-local drafts, including abandoned inspector edits, are never serialized.
-- Global DSP **is** persisted. Browser canvas layout, browser identity storage, and negotiated client channel counts are **not** part of server settings persistence.
+- Global DSP **is** persisted. Optional `device_streams` stores requested capture/playback widths by backend device ID. Older files without it use backend automatic selection. Browser canvas layout, browser identity storage, and negotiated client channel counts are **not** part of server settings persistence.
 - Legacy hardware gain/mute banks are loaded and preserved on save but remain inaudible; `/api/control` rejects new edits with 501.
 - Invalid/unavailable processor chains are preserved and bypassed with a warning. Correct/remove the offending processor and APPLY; recreating the route is also possible, but discards the old chain.
 - There is no settings import/reload HTTP endpoint. Change an offline file carefully and restart the application to load it.
 
-**Endpoint restoration:** loading registers nonempty saved source/destination strings even when endpoints are offline, instead of resolving them to an invalid transient node. A same-identity reconnect/reactivation binds the preserved node to its new handler; full endpoint strings (including embedded slashes) are matched. Offline source buffers start silent. Invalid/out-of-width/out-of-capacity saved routes are skipped. This is finite process-local identity mapping, not universal hardware hotplug discovery or backend-independent device IDs. Verify physical device IDs and routes after changing backend/hardware; disconnected known-client channel counts remain placeholders until hello.
+**Endpoint restoration:** loading registers nonempty saved source/destination strings even when endpoints are offline, instead of resolving them to an invalid transient node. A same-identity reconnect/reactivation binds the preserved node to its new handler; full endpoint strings (including embedded slashes) are matched. Offline source buffers start silent. Invalid/out-of-capacity saved routes or indices beyond 253 are skipped. Routes that no longer fit an active endpoint's width are retained in configuration but do not process; they can become valid again after reopening at a suitable width. This is finite process-local identity mapping, not universal hardware hotplug discovery or identity migration across different audio backends. Verify physical device IDs and routes after changing backend/hardware; disconnected known-client channel counts remain placeholders until hello.
 
 If you want to test without your normal wiring, stop the application and use a separate settings path rather than deleting a working configuration. A missing settings file starts without restored routes.
 
@@ -860,14 +931,14 @@ The current UI and registry are implemented; the following are remaining work, n
 
 1. **Network media protocol:** versioned frames, explicit format/sample-rate negotiation, sequence/timestamp tracking, jitter buffers, bounds/error reporting, and clock-drift compensation.
 2. **Real-time hardening and validation:** move graph construction off the processing path; remove remaining meter-map, snapshot and retirement locks/allocations where justified; measure scheduling/queue behavior. Graph endpoint ownership, deferred sender retirement and single-owner shutdown are now implemented, with isolated plain/TLS process checks passed; physical hardware lifecycle/latency checks remain outstanding.
-3. **Graph correctness/resource management:** reject/define cycle policy (enabled cycles remain unsupported), validate endpoint directions/actual channel counts, and improve resource reporting. Stable endpoint IDs and bounded registration fix reconnect identity loss, not unlimited/recycling capacity. Route DSP IDs remain limited to `1..1023`.
-4. **Backend portability:** opaque backend-aware IDs, more JACK/device testing, and explicit device/channel mapping behavior. ALSA-only fallback/filtering is now guarded, but general hardware compatibility is a goal, not a guarantee.
+3. **Graph correctness/resource management:** reject/define cycle policy (enabled cycles remain unsupported), extend offline endpoint validation and improve resource reporting. Stable endpoint IDs and bounded registration fix reconnect identity loss, not unlimited/recycling capacity. Route DSP IDs remain limited to `1..1023`.
+4. **Backend portability:** more JACK/device testing and physical device/channel mapping qualification. Backend-aware ID serialization is implemented for the selected Linux backends. ALSA-only fallback/filtering is now guarded, but general hardware compatibility is a goal, not a guarantee.
 5. **DSP ecosystem:** add EQ/filters/limiters and other registered C++ processors. The dynamic discovery/editor foundation exists; the effects themselves must still be implemented.
 6. **UI/state completion:** global control hydration, implemented hardware sample gain/mute (currently 501 unsupported), complete metering peak/clip behavior, and wider diagnostics. Whole-route validation/adoption is implemented; a draft/applied comparison modal is deferred.
 7. **Persistence recovery:** directory-fsync/power-loss durability and crash rollback/previous-good recovery are deferred. Current unique-temp, checked-file-fsync/close/rename saving is not crash recovery.
 8. **Security:** remove private-key distribution and add enforceable network/application access boundaries before production exposure.
 9. **Deferred optimizations:** clear only necessary node buffers and revisit disabled debug probes when useful. These do not change the low-latency block-size policy; the engine remains at **64 frames**.
 
-There is no implemented server-to-server mesh/discovery protocol, general native client SDK, arbitrary-channel engine, or external plugin format hosting yet.
+There is no implemented server-to-server mesh/discovery protocol, general native client SDK, unlimited-channel engine, or external plugin format hosting yet.
 
 [PLANNER.md](PLANNER.md) starts with a concise current P0 implementation/verification register, then retains the long historical roadmap **as an archive, not a current feature/status list**. Use this README, [docs/PLUGINS.md](docs/PLUGINS.md), and actual code/tests as the operational reference.

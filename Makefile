@@ -29,6 +29,9 @@ PLUGIN_TEST_OBJ = build/dsp_plugins_test.o
 PLUGIN_TEST_TARGET = build/dsp_plugins_test
 PLUGIN_TEST_DEPS = $(filter-out build/main.o,$(APP_OBJS)) $(MINIAUDIO_OBJ) $(IX_COMPAT_OBJS)
 
+CHANNEL_TEST_OBJ = build/channel_width_test.o
+CHANNEL_TEST_TARGET = build/channel_width_test
+
 all: build $(TARGET)
 
 build:
@@ -67,6 +70,16 @@ $(TEST_TARGET): $(TEST_OBJ)
 $(PLUGIN_TEST_OBJ): tests/dsp_plugins_test.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
+$(CHANNEL_TEST_OBJ): tests/channel_width_test.cpp | build
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(CHANNEL_TEST_TARGET): $(CHANNEL_TEST_OBJ) $(PLUGIN_TEST_DEPS)
+	$(CXX) $^ -o $@ $(LDFLAGS)
+
+# Synthetic hardware callbacks and manual DSP blocks only; never opens a backend.
+test-channels: $(CHANNEL_TEST_TARGET)
+	timeout 30 ./$(CHANNEL_TEST_TARGET)
+
 build/reliability_test.o: tests/reliability_test.cpp | build
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
@@ -93,7 +106,7 @@ test-plugins: $(PLUGIN_TEST_TARGET)
 	node tests/dashboard_plugins_test.js
 
 clean:
-	rm -f $(APP_OBJS) $(APP_OBJS:.o=.d) $(TARGET) $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_OBJ:.o=.d) $(PLUGIN_TEST_TARGET) build/reliability_test.o build/reliability_test.d build/reliability_test build/device_lifecycle_test.o build/device_lifecycle_test.d build/device_lifecycle_test $(IX_COMPAT_OBJS) build/ix_tls_shutdown.d build/ix_socket_server_shutdown.d build/ix_websocket_server_shutdown.d
+	rm -f $(APP_OBJS) $(APP_OBJS:.o=.d) $(TARGET) $(PLUGIN_TEST_OBJ) $(PLUGIN_TEST_OBJ:.o=.d) $(PLUGIN_TEST_TARGET) $(CHANNEL_TEST_OBJ) $(CHANNEL_TEST_OBJ:.o=.d) $(CHANNEL_TEST_TARGET) build/reliability_test.o build/reliability_test.d build/reliability_test build/device_lifecycle_test.o build/device_lifecycle_test.d build/device_lifecycle_test $(IX_COMPAT_OBJS) build/ix_tls_shutdown.d build/ix_socket_server_shutdown.d build/ix_websocket_server_shutdown.d
 
 clean-miniaudio:
 	rm -f $(MINIAUDIO_OBJ) $(MINIAUDIO_OBJ:.o=.d)
@@ -103,4 +116,4 @@ clean-alsatools:
 
 -include $(APP_OBJS:.o=.d) $(wildcard build/*.d)
 
-.PHONY: all clean clean-miniaudio clean-alsatools alsatools test-plugins test-reliability
+.PHONY: all clean clean-miniaudio clean-alsatools alsatools test-plugins test-reliability test-channels

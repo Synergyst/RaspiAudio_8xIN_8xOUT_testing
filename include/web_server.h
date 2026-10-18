@@ -11,6 +11,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 #include "ring_buffer.h"
 #include "constants.h"
 
@@ -38,14 +39,14 @@ struct ChannelControl {
 
 struct AudioMetrics {
     mutable std::mutex lock; // Protect map structure; channel values remain atomic.
-    std::unordered_map<std::string, std::array<ChannelMeter, CM5_MAX_CHANNELS>> capture;
-    std::unordered_map<std::string, std::array<ChannelMeter, CM5_MAX_CHANNELS>> playback;
+    std::unordered_map<std::string, std::vector<ChannelMeter>> capture;
+    std::unordered_map<std::string, std::vector<ChannelMeter>> playback;
 };
 
 struct AudioControls {
     mutable std::mutex lock;
-    std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CHANNELS>> capture;
-    std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CHANNELS>> playback;
+    std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CONTROL_CHANNELS>> capture;
+    std::unordered_map<std::string, std::array<ChannelControl, CM5_MAX_CONTROL_CHANNELS>> playback;
 };
 
 struct ToneControls {
@@ -66,8 +67,8 @@ struct WebClientSession {
     std::vector<float> io_buffer;
     std::vector<float> input_block;
     std::vector<float> output_block;
-    std::array<ChannelMeter, CM5_MAX_CHANNELS> input_metrics;
-    std::array<ChannelMeter, CM5_MAX_CHANNELS> output_metrics;
+    std::array<ChannelMeter, CM5_MAX_CLIENT_CHANNELS> input_metrics;
+    std::array<ChannelMeter, CM5_MAX_CLIENT_CHANNELS> output_metrics;
     std::vector<float> packet_block;
     std::atomic<bool> active{true};
     std::atomic<bool> media_ready{false};
@@ -119,6 +120,8 @@ public:
     bool remove_route(uint32_t routeId);
     bool update_route(uint32_t routeId, float gain, bool enabled);
     void update_activated_device(const std::string& id, bool active);
+    void set_device_channels(const std::string& id, unsigned capture, unsigned playback);
+    std::pair<unsigned, unsigned> device_channels(const std::string& id) const;
 
     // Node ID Management
     NodeId get_node_id(const std::string& endpoint) const;
@@ -136,6 +139,7 @@ private:
     std::shared_ptr<const std::vector<AudioRoute>> m_routes;
     std::unordered_map<std::string, std::string> m_known_client_names;
     std::vector<std::string> m_activatedDevices;
+    std::unordered_map<std::string, std::pair<unsigned, unsigned>> m_deviceChannels;
     std::atomic<uint32_t> m_next_route_id{1};
     DeviceManager* m_deviceManager = nullptr;
     DspEngine* m_dspEngine = nullptr;
