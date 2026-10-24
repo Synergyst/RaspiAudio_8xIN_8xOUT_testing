@@ -238,9 +238,9 @@ DeviceManager::DeviceManager(bool initializeBackend) {
 
     // Priority order: JACK (Pro) -> PulseAudio (Desktop) -> ALSA (Hardware Native)
     ma_backend backends[] = {
-        ma_backend_jack,
+        //ma_backend_jack,
         ma_backend_pulseaudio,
-        ma_backend_alsa,
+        //ma_backend_alsa,
     };
 
     std::cout << "[DeviceManager] Initializing backend search..." << std::endl;

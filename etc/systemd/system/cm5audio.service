@@ -1,0 +1,17 @@
+[Unit]
+Description=CM5 Audio Service
+After=wireplumber-root.service pipewire-root.service pipewire-pulse-root.service
+Requires=wireplumber-root.service pipewire-root.service pipewire-pulse-root.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=XDG_RUNTIME_DIR=/run/pipewire
+WorkingDirectory=/root/Sources/cm5audio
+ExecStart=/root/Sources/cm5audio/cm5audio --plain-text
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

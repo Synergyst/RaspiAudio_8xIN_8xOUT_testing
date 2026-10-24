@@ -1,0 +1,13 @@
+[Unit]
+Description=USB Audio Gadgets Setup
+After=local-fs.target sound.target
+Before=alsa-softvol-init.service pipewire-root.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/Sources/cm5audio/usb-gadgets.sh start
+ExecStop=/root/Sources/cm5audio/usb-gadgets.sh stop
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
