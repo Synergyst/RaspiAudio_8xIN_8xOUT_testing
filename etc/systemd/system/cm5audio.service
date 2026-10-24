@@ -10,8 +10,9 @@ Group=root
 Environment=XDG_RUNTIME_DIR=/run/pipewire
 WorkingDirectory=/root/Sources/cm5audio
 ExecStart=/root/Sources/cm5audio/cm5audio --plain-text
+ExecStartPost=/root/Sources/cm5audio/scripts/auto-wire.sh
 Restart=always
-RestartSec=2
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
