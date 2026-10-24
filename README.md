@@ -96,7 +96,7 @@ A default `ma_context_config` and a null configuration both use miniaudio's defa
 
 ### What devices can be used?
 
-The intended scope is general Linux audio devices, not a specific sound card. Multiple mono, stereo, or multichannel capture/playback endpoints can be active together. Compatibility still depends on:
+The intended scope is general Linux audio devices, not a specific sound card. Multiple mono, stereo, or multichannel capture/playback endpoints can be active together. Unless using PipeWire-Pulse with Pulseaudio backend **(strongly recommended)** - Compatibility still depends on:
 
 - The selected backend and its running server, permissions, and device visibility.
 - Ability to open a stream compatible with the application's requested format/rate.
