@@ -66,19 +66,35 @@ int port_from_env(const char* name, int fallback) {
         throw std::invalid_argument(std::string("Invalid port: ") + name);
     return port;
 }
+
+void print_usage(const char* programName) {
+    std::cout << "Usage: " << programName << " [options]\n\n"
+              << "Options:\n"
+              << "  -h, --help      Display this help message and exit\n"
+              << "  --plain-text    Run the web server in plain text mode\n"
+              << "  --no-audio      Bypass audio device manager and context initialization\n\n"
+              << "Environment Variables:\n"
+              << "  CM5AUDIO_HTTP_PORT  HTTP server port (default: 8182)\n"
+              << "  CM5AUDIO_WS_PORT    WebSocket server port (default: 8183)\n";
+}
 }
 
 int main(int argc, char** argv) {
     try {
-        // Install handlers before any backend constructor can create threads.
-        ShutdownNotification shutdown;
         bool plainText = false, noAudio = false;
         for (int i = 1; i < argc; ++i) {
             const std::string argument(argv[i]);
-            if (argument == "--plain-text") plainText = true;
+            if (argument == "--help" || argument == "-h") {
+                print_usage(argv[0]);
+                return 0;
+            }
+            else if (argument == "--plain-text") plainText = true;
             else if (argument == "--no-audio") noAudio = true;
             else throw std::invalid_argument("Unknown argument: " + argument);
         }
+
+        // Install handlers before any backend constructor can create threads.
+        ShutdownNotification shutdown;
         const int httpPort = port_from_env("CM5AUDIO_HTTP_PORT", 8182);
         const int wsPort = port_from_env("CM5AUDIO_WS_PORT", 8183);
         std::cout << "Starting cm5audio..." << std::endl;
